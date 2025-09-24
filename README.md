@@ -1,6 +1,6 @@
 # Aster Finance DEX Simple High Frequency Market Making
 
-A simple Python high frequency market making bot for the Aster Finance DEX platform with real-time balance tracking.
+A simple Python high frequency market making bot for the Aster Finance DEX platformusing websockets and Rest API calls.
 
 Referral link to support this work: [https://www.asterdex.com/en/referral/164f81](https://www.asterdex.com/en/referral/164f81) Earn 10% rebate (I put maximum for you).
 
