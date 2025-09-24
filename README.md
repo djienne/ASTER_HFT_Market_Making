@@ -107,6 +107,9 @@ and more...
 ## Docker Deployment
 
 ```bash
+# Build
+docker-compose build
+
 # Build and run
 docker-compose up --build
 
@@ -123,7 +126,7 @@ docker-compose logs -f market-maker
 **Change trading symbol**: Edit the `command` line in `docker-compose.yml`
 ```yaml
 market-maker:
-  command: python market_maker.py --symbol ETHUSDT
+  command: python market_maker.py --symbol ASTERUSDT
 ```
 
 ## Performance Recommendations
