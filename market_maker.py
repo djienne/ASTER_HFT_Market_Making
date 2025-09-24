@@ -19,7 +19,7 @@ DEFAULT_BALANCE_FRACTION = 0.2  # Use fraction of available balance for each ord
 POSITION_THRESHOLD_USD = 15.0  # Fixed USD value threshold for position closure
 
 # TIMING (in seconds)
-ORDER_REFRESH_INTERVAL = 0.5     # How long to wait before cancelling an unfilled order.
+ORDER_REFRESH_INTERVAL = 1.0     # How long to wait before cancelling an unfilled order.
 RETRY_ON_ERROR_INTERVAL = 30    # How long to wait after a major error before retrying.
 PRICE_REPORT_INTERVAL = 60      # How often to report current prices and spread.
 
