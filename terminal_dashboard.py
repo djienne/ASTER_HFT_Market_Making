@@ -333,10 +333,10 @@ class TerminalDashboard:
                 if mark_info:
                     mark_val = mark_info.get('mark')
                     if mark_val is not None:
-                        mark_display = f"{mark_val:,.2f}"
+                        mark_display = f"{mark_val:,.3f}"
                     mid_val = mark_info.get('mid')
                     if mid_val is not None:
-                        mid_display = f"{mid_val:>12.2f}"
+                        mid_display = f"{mid_val:>12.3f}"
                     funding_val = mark_info.get('funding')
                     if funding_val is not None:
                         funding_plain = f"{funding_val:.4f}%".rjust(10)
@@ -349,13 +349,13 @@ class TerminalDashboard:
                 pnl_value = pos.get('unrealized', 0.0)
                 pnl_plain = f"{pnl_value:>14.2f}"
                 entry_price = pos.get('entry')
-                entry_display = f"{entry_price:>12.2f}" if entry_price is not None else '--'.rjust(12)
+                entry_display = f"{entry_price:>12.3f}" if entry_price is not None else '--'.rjust(12)
                 quote_ref = mid_val if mid_val is not None else mark_val if mark_val is not None else entry_price
                 quote_value = None
                 quote_plain = '--'.rjust(14)
                 if quote_ref is not None:
                     quote_value = amount * quote_ref
-                    quote_plain = f"{quote_value:>14.2f}"
+                    quote_plain = f"{quote_value:>14.3f}"
                 if USE_COLOR:
                     amount_color = GREEN if amount >= 0 else RED
                     amount_text = colorize(amount_plain, amount_color)
@@ -387,7 +387,7 @@ class TerminalDashboard:
                 qty = entry["qty"]
                 filled = entry["filled"]
                 progress = f"{filled:.4f}/{qty:.4f}" if qty else f"{filled:.4f}"
-                avg_price = f"{entry['avg']:.4f}" if entry["avg"] else '0.00'
+                avg_price = f"{entry['avg']:.3f}" if entry["avg"] else '0.000'
                 realized = entry["realized"]
                 if abs(realized) < 1e-9:
                     pnl_label = "0.00 USD"
@@ -404,7 +404,7 @@ class TerminalDashboard:
                 progress_str = progress
                 avg_str = avg_price
                 price_value = entry['price']
-                price_str = f"{price_value:.4f}" if price_value else '0.00'
+                price_str = f"{price_value:.3f}" if price_value else '0.000'
                 pct_str = '--'
                 mark_info = self.mark_prices.get(symbol)
                 ref_price = None
@@ -414,10 +414,10 @@ class TerminalDashboard:
                     mark_val = mark_info.get('mark')
                     if mid_val:
                         ref_price = mid_val
-                        mid_str = f"{mid_val:.4f}"
+                        mid_str = f"{mid_val:.3f}"
                     elif mark_val:
                         ref_price = mark_val
-                        mid_str = f"{mark_val:.4f}"
+                        mid_str = f"{mark_val:.3f}"
                 if price_value and ref_price:
                     pct = (price_value - ref_price) / ref_price * 100
                     pct_str = f"{pct:+.2f}%"
