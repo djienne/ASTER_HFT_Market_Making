@@ -17,6 +17,8 @@ pip install -r requirements.txt
 # Configure API credentials (copy .env.example to .env and edit)
 cp .env.example .env
 
+# find and copy/paste your API keys (see below)
+
 # Run the market maker
 python market_maker.py --symbol ASTERUSDT
 ```
