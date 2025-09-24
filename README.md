@@ -1,8 +1,8 @@
-# Aster Finance Trading System
+# Aster Finance DEX Simple High Frequency Market Making
+
+A simple Python high frequency market making bot for the Aster Finance DEX platform with real-time balance tracking.
 
 Referral link to support this work: [https://www.asterdex.com/en/referral/164f81](https://www.asterdex.com/en/referral/164f81) Earn 10% rebate (I put maximum for you).
-
-A simple Python market making bot for the Aster Finance DEX platform with real-time balance tracking and dual API authentication support.
 
 **How it works**: The bot performs "ping-pong" trading by placing buy and sell limit orders around the current market price using a fraction of your available capital in the perpetual futures account. When one order fills, it immediately places a new order on the opposite side to capture the spread.
 
