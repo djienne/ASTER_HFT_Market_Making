@@ -144,7 +144,7 @@ market-maker:
 - Default: 1 second (`ORDER_REFRESH_INTERVAL = 1`)
 - **Optimization**: Try reducing this value to increase update frequency
 - **Caution**: Don't go too low or you'll hit AsterDEX's rate limits
-- Test incrementally (e.g., 0.5s → 0.3s → 0.2s) to find your optimal balance. Don't forget to adjust other variables too (`MIN_ORDER_INTERVAL`, `RETRY_ON_ERROR_INTERVAL`, ...)
+- Test incrementally (e.g., 0.5s → 0.3s → 0.2s) to find your optimal balance. Don't forget to adjust other variables too (`MIN_ORDER_INTERVAL`, `RETRY_ON_ERROR_INTERVAL`, `asyncio.sleep` calls, ...)
 
 ---
 
