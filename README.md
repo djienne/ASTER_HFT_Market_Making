@@ -89,7 +89,7 @@ python websocket_orders.py
 
 # Market data utilities
 python get_price.py ETHUSDT
-python get_trades.py ETHUSDT --limit 50
+python get_trades.py ETHUSDT --limit 50 # all trades executed, not only you (mostly not you)
 
 # Order monitoring
 python websocket_user_data.py
