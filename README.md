@@ -78,11 +78,11 @@ RELEASE_MODE = True                     # True = prints errors only, False = pri
 
 *Future updates may include dynamic spread models (Avellaneda-Stoikov, Cartea-Jaimungal, or other alternatives) for automated spread optimization.*
 
-## Other scripts (some in fodler `test`, may need to be together with `api_client.py` to work)
-
+## Other scripts
+Python scripts in folder `test`, may need to be together with `api_client.py` to work.
 
 ```bash
-# Live order monitoring (detailed view - orders on ASTER website too fast to see)
+# Live order monitoring (detailed view - orders on ASTER website are too fast to see properly)
 python websocket_orders.py
 
 # Main trading bot
