@@ -32,7 +32,7 @@ CANCEL_SPECIFIC_ORDER = True # If True, cancel specific order ID. If False, canc
 
 # LOGGING
 LOG_FILE = 'market_maker.log'
-RELEASE_MODE = True  # When True, suppress all non-error logs and prints
+RELEASE_MODE = False  # When True, suppress all non-error logs and prints
 
 # Global variables for price data and rate limiting
 price_last_updated = None
