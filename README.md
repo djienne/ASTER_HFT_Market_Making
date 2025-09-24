@@ -1,6 +1,6 @@
 # Aster Finance DEX Simple High Frequency Market Making
 
-A simple Python high frequency market making bot for the Aster Finance DEX platformusing websockets and Rest API calls.
+A simple Python high frequency market making bot for the Aster Finance DEX platform using websockets and Rest API calls.
 
 Referral link to support this work: [https://www.asterdex.com/en/referral/164f81](https://www.asterdex.com/en/referral/164f81) Earn 10% rebate (I put maximum for you).
 
@@ -58,6 +58,12 @@ RELEASE_MODE = True                     # True = errors only, False = detailed l
 - Market volatility and liquidity
 - Your risk tolerance and capital requirements
 - Backtesting and observation of market conditions
+
+**Key Parameters**:
+- **`DEFAULT_BALANCE_FRACTION`**: Controls order sizing - with 0.2 (20%), each order uses 20% of your available balance. Lower values = smaller orders, higher values = larger orders but more risk.
+- **`POSITION_THRESHOLD_USD`**: When your net position exceeds this USD value ($15 default), the bot will only place orders to reduce the position (no new position building). Helps manage inventory risk.
+
+**Account Recommendation**: Use a **dedicated account** for the bot to avoid conflicts with manual trading and ensure accurate balance calculations.
 
 **Note**: The default ±0.6% spreads worked well for ASTERUSDT on September 24th, 2024, but:
 - Market conditions change over time - these values will likely need adjustment
