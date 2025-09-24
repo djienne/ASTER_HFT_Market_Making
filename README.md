@@ -78,9 +78,13 @@ RELEASE_MODE = True                     # True = prints errors only, False = pri
 
 *Future updates may include dynamic spread models (Avellaneda-Stoikov, Cartea-Jaimungal, or other alternatives) for automated spread optimization.*
 
-## Usage
+## Other scripts (some in fodler `test`, may need to be together with `api_client.py` to work)
+
 
 ```bash
+# Live order monitoring (detailed view - orders on ASTER website too fast to see)
+python websocket_orders.py
+
 # Main trading bot
 python market_maker.py --symbol ETHUSDT
 
@@ -96,8 +100,7 @@ python test_account_balance.py
 python data_collector.py
 python websocket_user_data.py
 
-# Live order monitoring (detailed view - orders on ASTER website too fast to see)
-python websocket_orders.py
+
 
 # Testing scripts (located in tests/ directory)
 python tests/test_balance.py
