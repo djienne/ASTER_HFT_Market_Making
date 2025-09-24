@@ -64,7 +64,7 @@ RELEASE_MODE = True                     # True = prints errors only, False = pri
 - Your risk tolerance and capital requirements
 - Backtesting and observation of market conditions
 
-**Key Parameters**:
+**Important info about Parameters**:
 - **`DEFAULT_BALANCE_FRACTION`**: Controls order sizing - with 0.2 (20%), each order uses 20% of your available balance. Lower values = smaller orders, higher values = larger orders but more risk.
 - **`POSITION_THRESHOLD_USD`**: When your net position exceeds this USD value ($15 default), the bot will only place orders to reduce the position (no new position building). Helps manage inventory risk.
 
