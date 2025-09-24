@@ -161,9 +161,13 @@ class TerminalDashboard:
         self.last_reason = "REST SNAPSHOT"
         self._update_mark_symbols()
 
-    def handle_account_update(self, payload: Dict[str, object]) -> None:
+    def handle_account_update(self, payload: Dict[str, object], event_time: int = 0) -> None:
         self.last_reason = payload.get("m", "ACCOUNT_UPDATE")
         self.account_update_count += 1
+        timestamp = (
+            datetime.fromtimestamp(event_time / 1000).strftime("%H:%M:%S.%f")[:-3] if event_time else "--"
+        )
+        self.last_event_time = timestamp
 
         for balance in payload.get("B", []):
             asset = balance.get("a")
@@ -202,7 +206,7 @@ class TerminalDashboard:
     def handle_order_update(self, order: Dict[str, object]) -> None:
         event_time = order.get("T") or order.get("O") or 0
         timestamp = (
-            datetime.fromtimestamp(event_time / 1000).strftime("%H:%M:%S") if event_time else "--"
+            datetime.fromtimestamp(event_time / 1000).strftime("%H:%M:%S.%f")[:-3] if event_time else "--"
         )
         entry = {
             "time": timestamp,
@@ -227,7 +231,11 @@ class TerminalDashboard:
             self.trade_count += 1
         self.last_event_time = timestamp
 
-    def handle_margin_call(self, payload: Dict[str, object]) -> None:
+    def handle_margin_call(self, payload: Dict[str, object], event_time: int = 0) -> None:
+        timestamp = (
+            datetime.fromtimestamp(event_time / 1000).strftime("%H:%M:%S.%f")[:-3] if event_time else "--"
+        )
+        self.last_event_time = timestamp
         alerts = []
         for pos in payload.get("p", []):
             symbol = pos.get("s", "N/A")
@@ -400,13 +408,16 @@ class TerminalDashboard:
                 pct_str = '--'
                 mark_info = self.mark_prices.get(symbol)
                 ref_price = None
+                mid_str = '--'
                 if mark_info:
                     mid_val = mark_info.get('mid')
                     mark_val = mark_info.get('mark')
                     if mid_val:
                         ref_price = mid_val
+                        mid_str = f"{mid_val:.4f}"
                     elif mark_val:
                         ref_price = mark_val
+                        mid_str = f"{mark_val:.4f}"
                 if price_value and ref_price:
                     pct = (price_value - ref_price) / ref_price * 100
                     pct_str = f"{pct:+.2f}%"
@@ -416,7 +427,7 @@ class TerminalDashboard:
                 pnl_str = pnl_label
                 print(
                     f"  {time_str:<8} {symbol:<10} {side_str:<5} {status_str:<13} ({exec_type:<8}) "
-                    f"qty {progress_str:<18} avg {avg_str:>7} limit {price_str:>8} dev {pct_str:<9} pnl {pnl_str:<12}"
+                    f"qty {progress_str:<18} avg {avg_str:>7} limit {price_str:>8} mid {mid_str:>8} dev {pct_str:<9} pnl {pnl_str:<12}"
                 )
             else:
                 print(colorize("  -- waiting for order activity --", DIM))
@@ -572,13 +583,13 @@ class TerminalDashboard:
                     data = json.loads(message)
                     event_type = data.get("e", "unknown")
                     if event_type == "ACCOUNT_UPDATE":
-                        self.handle_account_update(data.get("a", {}))
+                        self.handle_account_update(data.get("a", {}), data.get("E", 0))
                         self.render("ACCOUNT UPDATE")
                     elif event_type == "ORDER_TRADE_UPDATE":
                         self.handle_order_update(data.get("o", {}))
                         self.render("ORDER EVENT")
                     elif event_type == "MARGIN_CALL":
-                        self.handle_margin_call(data)
+                        self.handle_margin_call(data, data.get("E", 0))
                         self.render("MARGIN CALL")
                     elif event_type == "listenKeyExpired":
                         self.last_reason = "listenKeyExpired"
@@ -680,7 +691,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--duration",
         type=int,
-        default=180,
+        default=3600,
         help="Seconds to run before auto exit (<=0 to run until interrupted)",
     )
     parser.add_argument(
@@ -699,4 +710,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
