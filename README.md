@@ -54,7 +54,8 @@ DEFAULT_PRICE_CHANGE_THRESHOLD = 0.001  # Min price change to cancel and replace
                                         # to avoid unecessary cancel/open order API calls
 
 # Logging
-RELEASE_MODE = True                     # True = errors only, False = detailed logs
+RELEASE_MODE = True                     # True = errors only, False = detailed logs,
+                                        # to reduce disk and CPU load, specially critical for VPS
 ```
 
 **Important**: This bot uses **fixed spreads** - you must determine your optimal spread values based on:
