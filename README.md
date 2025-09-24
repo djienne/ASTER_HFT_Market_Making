@@ -95,6 +95,15 @@ python test_account_balance.py
 # Optional monitoring
 python data_collector.py
 python websocket_user_data.py
+
+# Live order monitoring (detailed view - orders on ASTER website too fast to see)
+python websocket_orders.py
+
+# Testing scripts (located in tests/ directory)
+python tests/test_balance.py
+python tests/test_account_balance.py
+python tests/test_cancel_order.py
+python tests/websocket_user_data.py
 ```
 
 ## Docker Deployment
@@ -133,22 +142,6 @@ market-maker:
 - **Optimization**: Try reducing this value to increase update frequency
 - **Caution**: Don't go too low or you'll hit AsterDEX's rate limits
 - Test incrementally (e.g., 0.5s → 0.3s → 0.2s) to find your optimal balance
-
-## File Structure
-
-```
-ASTER/
-├── market_maker.py                  # Main trading bot
-├── api_client.py                    # API client for Aster Finance
-├── .env                            # API credentials (required)
-├── requirements.txt                # Python dependencies
-├── get_price.py                    # Price utility
-├── get_trades.py                   # Trade data utility
-├── test_*.py                       # Testing scripts
-├── websocket_*.py                  # WebSocket monitoring (optional)
-├── data_collector.py               # Data collection (optional)
-└── docker-compose.yml             # Docker setup (optional)
-```
 
 ---
 
