@@ -11,7 +11,7 @@ from api_client import ApiClient
 
 # --- Configuration ---
 # STRATEGY
-DEFAULT_SYMBOL = "ETHUSDT"
+DEFAULT_SYMBOL = "ASTERUSDT"
 DEFAULT_BUY_SPREAD = 0.006   # 0.6% below mid-price for buy orders
 DEFAULT_SELL_SPREAD = 0.006  # 0.6% above mid-price for sell orders
 DEFAULT_LEVERAGE = 1
@@ -19,7 +19,7 @@ DEFAULT_BALANCE_FRACTION = 0.2  # Use fraction of available balance for each ord
 POSITION_THRESHOLD_USD = 15.0  # Fixed USD value threshold for position closure
 
 # TIMING (in seconds)
-ORDER_REFRESH_INTERVAL = 0.5    # How long to wait before cancelling an unfilled order.
+ORDER_REFRESH_INTERVAL = 5    # How long to wait before cancelling an unfilled order.
 RETRY_ON_ERROR_INTERVAL = 30    # How long to wait after a major error before retrying.
 PRICE_REPORT_INTERVAL = 60      # How often to report current prices and spread to terminal.
 BALANCE_REPORT_INTERVAL = 30    # How often to report account balance to terminal.
@@ -106,61 +106,83 @@ class StrategyState:
         self.usdt_balance = 0.0
         # Queue for order updates from WebSocket
         self.order_updates = asyncio.Queue()
+        # [ADDED] WebSocket connection health flags
+        self.price_ws_connected = False
+        self.user_data_ws_connected = False
 
 
 async def websocket_price_updater(state, symbol):
-    """WebSocket-based price updater using depth streams."""
+    """[MODIFIED] WebSocket-based price updater with exponential backoff and stale connection detection."""
     global price_last_updated
     log = logging.getLogger('WebSocketPriceUpdater')
 
     websocket_url = f"wss://fstream.asterdex.com/ws/{symbol.lower()}@depth5"
-    reconnect_delay = 5
+    reconnect_delay = 5  # Initial delay
+    max_reconnect_delay = 60 # Maximum wait time
 
     while not shutdown_requested:
         try:
             log.info(f"Connecting to WebSocket: {websocket_url}")
+            state.price_ws_connected = False # Mark as disconnected while attempting
 
-            async with websockets.connect(websocket_url, ping_interval=30, ping_timeout=10) as websocket:
+            async with websockets.connect(websocket_url, ping_interval=20, ping_timeout=10) as websocket:
                 log.info(f"WebSocket connected for {symbol} depth stream")
+                state.price_ws_connected = True # Mark as connected
+                reconnect_delay = 5  # Reset reconnect delay on successful connection
+                last_message_time = asyncio.get_event_loop().time()
 
-                async for message in websocket:
-                    if shutdown_requested:
-                        break
-
+                while not shutdown_requested:
                     try:
-                        data = json.loads(message)
+                        # [MODIFIED] Wait for a message with a timeout to detect stale connections
+                        message = await asyncio.wait_for(websocket.recv(), timeout=30.0)
+                        last_message_time = asyncio.get_event_loop().time()
 
-                        if data.get('e') == 'depthUpdate' and ('b' in data and 'a' in data):
-                            bids = data.get('b', [])
-                            asks = data.get('a', [])
+                        try:
+                            data = json.loads(message)
 
-                            if bids and asks:
-                                # Get best bid and ask
-                                best_bid = float(bids[0][0])
-                                best_ask = float(asks[0][0])
-                                mid_price = (best_bid + best_ask) / 2
+                            if data.get('e') == 'depthUpdate' and ('b' in data and 'a' in data):
+                                bids = data.get('b', [])
+                                asks = data.get('a', [])
 
-                                # Update state variables
-                                state.bid_price = best_bid
-                                state.ask_price = best_ask
-                                state.mid_price = mid_price
-                                price_last_updated = asyncio.get_event_loop().time()
+                                if bids and asks:
+                                    best_bid = float(bids[0][0])
+                                    best_ask = float(asks[0][0])
+                                    mid_price = (best_bid + best_ask) / 2
 
-                                log.debug(f"Updated prices for {symbol}: Bid={best_bid}, Ask={best_ask}, Mid={mid_price:.4f}")
+                                    state.bid_price = best_bid
+                                    state.ask_price = best_ask
+                                    state.mid_price = mid_price
+                                    price_last_updated = asyncio.get_event_loop().time()
 
-                    except json.JSONDecodeError:
-                        log.warning("Failed to decode WebSocket message")
-                    except Exception as e:
-                        log.error(f"Error processing WebSocket message: {e}")
+                                    log.debug(f"Updated prices for {symbol}: Bid={best_bid}, Ask={best_ask}, Mid={mid_price:.4f}")
 
-        except websockets.exceptions.ConnectionClosed as e:
-            log.warning(f"WebSocket connection closed: {e}")
+                        except json.JSONDecodeError:
+                            log.warning("Failed to decode WebSocket message")
+                        except Exception as e:
+                            log.error(f"Error processing WebSocket message: {e}")
+                    
+                    # [ADDED] Stale connection detection logic
+                    except asyncio.TimeoutError:
+                        time_since_last_msg = asyncio.get_event_loop().time() - last_message_time
+                        if time_since_last_msg > 60:
+                            log.warning(f"No price messages received for {time_since_last_msg:.1f}s. Connection may be stale. Reconnecting...")
+                            break # Exit inner loop to force reconnection
+                        else:
+                            log.debug(f"Price WebSocket recv timed out ({time_since_last_msg:.1f}s since last message), but connection seems alive.")
+                            continue # Continue waiting for messages
+
+        except (websockets.exceptions.ConnectionClosed, websockets.exceptions.InvalidState) as e:
+            log.warning(f"Price WebSocket connection issue: {e}")
         except Exception as e:
-            log.error(f"WebSocket error: {e}")
+            log.error(f"Price WebSocket error: {e}")
+        finally:
+            state.price_ws_connected = False # Mark as disconnected on any error/exit
 
         if not shutdown_requested:
-            log.info(f"Reconnecting to WebSocket in {reconnect_delay}s...")
+            log.info(f"Reconnecting to price WebSocket in {reconnect_delay:.1f}s...")
             await asyncio.sleep(reconnect_delay)
+            # [MODIFIED] Implement exponential backoff
+            reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
 
     log.info("WebSocket price updater shutting down")
 
@@ -220,7 +242,7 @@ async def keepalive_balance_listen_key(state, client):
 
 
 async def websocket_user_data_updater(state, client):
-    """[IMPROVED] WebSocket-based user data updater for account and order updates."""
+    """[MODIFIED] WebSocket-based user data updater for account and order updates."""
     log = logging.getLogger('UserDataUpdater')
     reconnect_delay = 5
     max_reconnect_delay = 60 # Maximum wait time between reconnection attempts
@@ -229,6 +251,7 @@ async def websocket_user_data_updater(state, client):
     while not shutdown_requested:
         try:
             log.info("Getting listen key for user data stream...")
+            state.user_data_ws_connected = False # Mark as disconnected
             apiv1_public = os.getenv('APIV1_PUBLIC_KEY')
             apiv1_private = os.getenv('APIV1_PRIVATE_KEY')
 
@@ -258,6 +281,7 @@ async def websocket_user_data_updater(state, client):
                 close_timeout=10
             ) as websocket:
                 log.info("User data WebSocket connected!")
+                state.user_data_ws_connected = True # Mark as connected
                 reconnect_delay = 5  # Reset reconnect delay on successful connection
                 last_message_time = asyncio.get_event_loop().time()
 
@@ -311,6 +335,7 @@ async def websocket_user_data_updater(state, client):
         except Exception as e:
             log.error(f"An unexpected error occurred in user data updater: {e}", exc_info=True)
         finally:
+            state.user_data_ws_connected = False # Mark as disconnected on any error/exit
             if keepalive_task and not keepalive_task.done():
                 keepalive_task.cancel()
                 try:
@@ -404,6 +429,31 @@ async def market_making_loop(state, client, args):
 
     while not shutdown_requested:
         try:
+            # [ADDED] Primary check for WebSocket health before proceeding.
+            if not state.price_ws_connected or not state.user_data_ws_connected:
+                ws_status = f"Price_WS_Connected={state.price_ws_connected}, User_Data_WS_Connected={state.user_data_ws_connected}"
+                log.warning(f"A WebSocket is disconnected ({ws_status}). Pausing trading logic.")
+
+                # [ADDED] Safety measure: Cancel active order if we lose connectivity
+                if state.active_order_id:
+                    log.warning(f"Attempting to cancel active order {state.active_order_id} due to WebSocket disconnection.")
+                    try:
+                        if CANCEL_SPECIFIC_ORDER:
+                            await client.cancel_order(args.symbol, state.active_order_id)
+                        else:
+                            await client.cancel_all_orders(args.symbol)
+                        state.active_order_id = None
+                        state.last_order_price = None
+                        state.last_order_side = None
+                        state.last_order_quantity = None
+                        log.info(f"Successfully cancelled order {state.active_order_id} as a safety measure.")
+                    except Exception as cancel_error:
+                        log.error(f"Could not cancel order {state.active_order_id} during WS outage: {cancel_error}")
+                
+                await asyncio.sleep(5) # Wait before checking again
+                continue
+
+            # --- Secondary checks for fresh data ---
             if not is_price_data_valid(state):
                 log.info("Waiting for valid price data from WebSocket...")
                 await asyncio.sleep(2)
