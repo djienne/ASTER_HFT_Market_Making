@@ -16,10 +16,10 @@ DEFAULT_BUY_SPREAD = 0.006   # 0.6% below mid-price for buy orders
 DEFAULT_SELL_SPREAD = 0.006  # 0.6% above mid-price for sell orders
 DEFAULT_LEVERAGE = 1
 DEFAULT_BALANCE_FRACTION = 0.2  # Use fraction of available balance for each order
-POSITION_THRESHOLD_USD = 15.0  # Fixed USD value threshold for position closure
+POSITION_THRESHOLD_USD = 15.0  # USD threshold to switch to sell mode in case of partial order fill
 
 # TIMING (in seconds)
-ORDER_REFRESH_INTERVAL = 1    # How long to wait before cancelling an unfilled order (seconds).
+ORDER_REFRESH_INTERVAL = 5.0    # How long to wait before cancelling an unfilled order.
 RETRY_ON_ERROR_INTERVAL = 30    # How long to wait after a major error before retrying.
 PRICE_REPORT_INTERVAL = 60      # How often to report current prices and spread to terminal.
 BALANCE_REPORT_INTERVAL = 60    # How often to report account balance to terminal.
@@ -99,11 +99,12 @@ class StrategyState:
         self.last_order_side = None
         self.last_order_quantity = None
         # Account balance tracking
-        self.account_balance = None  # Total USDF + USDT balance
+        self.account_balance = None  # Total USDF + USDT + USDC balance
         self.balance_last_updated = None
         self.balance_listen_key = None
         self.usdf_balance = 0.0
         self.usdt_balance = 0.0
+        self.usdc_balance = 0.0
         # Queue for order updates from WebSocket
         self.order_updates = asyncio.Queue()
         # [ADDED] WebSocket connection health flags
@@ -302,10 +303,12 @@ async def websocket_user_data_updater(state, client):
                                         state.usdf_balance = float(balance.get('wb', '0'))
                                     elif balance.get('a') == 'USDT':
                                         state.usdt_balance = float(balance.get('wb', '0'))
+                                    elif balance.get('a') == 'USDC':
+                                        state.usdc_balance = float(balance.get('wb', '0'))
 
-                                state.account_balance = state.usdf_balance + state.usdt_balance
+                                state.account_balance = state.usdf_balance + state.usdt_balance + state.usdc_balance
                                 state.balance_last_updated = asyncio.get_event_loop().time()
-                                log.info(f"Balance updated: USDF={state.usdf_balance:.4f}, USDT={state.usdt_balance:.4f}, Total=${state.account_balance:.4f}")
+                                log.info(f"Balance updated: USDF={state.usdf_balance:.4f}, USDT={state.usdt_balance:.4f}, USDC={state.usdc_balance:.4f}, Total=${state.account_balance:.4f}")
                             
                             elif event_type == 'ORDER_TRADE_UPDATE':
                                 order_data = data.get('o', {})
@@ -367,7 +370,7 @@ async def balance_reporter(state):
             await asyncio.sleep(BALANCE_REPORT_INTERVAL)  # Report every 30 seconds
 
             if not shutdown_requested and is_balance_data_valid(state):
-                log.info(f"Account Balance: USDF={state.usdf_balance:.4f}, USDT={state.usdt_balance:.4f}, Total=${state.account_balance:.4f}")
+                log.info(f"Account Balance: USDF={state.usdf_balance:.4f}, USDT={state.usdt_balance:.4f}, USDC={state.usdc_balance:.4f}, Total=${state.account_balance:.4f}")
 
         except Exception as e:
             log.error(f"Error in balance reporter: {e}")
@@ -421,6 +424,7 @@ def should_reuse_order(state, new_price, new_side, new_quantity, threshold=DEFAU
 
 
 def get_spreads(state):
+    global DEFAULT_BUY_SPREAD, DEFAULT_SELL_SPREAD
     """
     Abstracted function to determine bid and ask spreads.
     This can be modified to implement dynamic spread calculations.
@@ -781,12 +785,15 @@ async def fetch_initial_balance(state, client):
             elif asset == 'USDT':
                 state.usdt_balance = wallet_balance
                 log.info(f"Initial USDT balance: {wallet_balance}")
+            elif asset == 'USDC':
+                state.usdc_balance = wallet_balance
+                log.info(f"Initial USDC balance: {wallet_balance}")
 
         # Calculate total balance
-        state.account_balance = state.usdf_balance + state.usdt_balance
+        state.account_balance = state.usdf_balance + state.usdt_balance + state.usdc_balance
         state.balance_last_updated = asyncio.get_event_loop().time()
 
-        log.info(f"Initial balance loaded: USDF={state.usdf_balance:.4f}, USDT={state.usdt_balance:.4f}, Total=${state.account_balance:.4f}")
+        log.info(f"Initial balance loaded: USDF={state.usdf_balance:.4f}, USDT={state.usdt_balance:.4f}, USDC={state.usdc_balance:.4f}, Total=${state.account_balance:.4f}")
         return True
 
     except Exception as e:
