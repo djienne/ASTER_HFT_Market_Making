@@ -19,7 +19,7 @@ DEFAULT_BALANCE_FRACTION = 0.2  # Use fraction of available balance for each ord
 POSITION_THRESHOLD_USD = 15.0  # Fixed USD value threshold for position closure
 
 # TIMING (in seconds)
-ORDER_REFRESH_INTERVAL = 5    # How long to wait before cancelling an unfilled order.
+ORDER_REFRESH_INTERVAL = 0.5    # How long to wait before cancelling an unfilled order.
 RETRY_ON_ERROR_INTERVAL = 30    # How long to wait after a major error before retrying.
 PRICE_REPORT_INTERVAL = 60      # How often to report current prices and spread to terminal.
 BALANCE_REPORT_INTERVAL = 30    # How often to report account balance to terminal.
@@ -420,6 +420,17 @@ def should_reuse_order(state, new_price, new_side, new_quantity, threshold=DEFAU
     return price_change_pct < threshold
 
 
+def get_spreads(state):
+    """
+    Abstracted function to determine bid and ask spreads.
+    This can be modified to implement dynamic spread calculations.
+    
+    :param state: The current strategy state.
+    :return: A tuple of (buy_spread, sell_spread).
+    """
+    return DEFAULT_BUY_SPREAD, DEFAULT_SELL_SPREAD
+
+
 async def market_making_loop(state, client, args):
     """The main market making logic loop."""
     log = logging.getLogger('MarketMakerLoop')
@@ -482,22 +493,23 @@ async def market_making_loop(state, client, args):
                     log.warning(f"Failed to double-check position, proceeding with current mode: {e}")
 
             # --- Determine Strategy and Parameters ---
+            buy_spread, sell_spread = get_spreads(state)
             if state.mode == 'SELL':
                 log.info(f"Position size is {state.position_size}. Entering SELL mode.")
                 side, reduce_only = "SELL", True
                 quantity_to_trade = abs(state.position_size)
-                limit_price = state.mid_price * (1 + DEFAULT_SELL_SPREAD)
-                log.debug(f"SELL mode parameters: side={side}, reduce_only={reduce_only}, quantity_to_trade={quantity_to_trade}, limit_price={limit_price}, spread={DEFAULT_SELL_SPREAD}")
+                limit_price = state.mid_price * (1 + sell_spread)
+                log.debug(f"SELL mode parameters: side={side}, reduce_only={reduce_only}, quantity_to_trade={quantity_to_trade}, limit_price={limit_price}, spread={sell_spread}")
             else: # BUY Mode
                 log.info("No significant position. Entering BUY mode.")
                 side, reduce_only = "BUY", False
                 order_amount_usd = state.account_balance * DEFAULT_BALANCE_FRACTION
                 quantity_to_trade = order_amount_usd / state.mid_price
-                limit_price = state.mid_price * (1 - DEFAULT_BUY_SPREAD)
-                log.debug(f"BUY mode parameters: side={side}, reduce_only={reduce_only}, order_amount_usd={order_amount_usd:.2f}, quantity_to_trade={quantity_to_trade}, limit_price={limit_price}, spread={DEFAULT_BUY_SPREAD}")
+                limit_price = state.mid_price * (1 - buy_spread)
+                log.debug(f"BUY mode parameters: side={side}, reduce_only={reduce_only}, order_amount_usd={order_amount_usd:.2f}, quantity_to_trade={quantity_to_trade}, limit_price={limit_price}, spread={buy_spread}")
 
             log.info(f"Calculated order parameters: side={side}, quantity={quantity_to_trade:.8f}, price={limit_price:.8f}, reduce_only={reduce_only}")
-            current_spread = DEFAULT_SELL_SPREAD if side == 'SELL' else DEFAULT_BUY_SPREAD
+            current_spread = sell_spread if side == 'SELL' else buy_spread
             log.debug(f"Market data: mid_price={state.mid_price:.8f}, bid={state.bid_price:.8f}, ask={state.ask_price:.8f}, using_spread={current_spread}")
 
             # --- Adjust order to conform to exchange filters ---
