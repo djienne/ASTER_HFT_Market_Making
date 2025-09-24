@@ -1,0 +1,8 @@
+requests
+python-dotenv
+web3
+eth-account
+eth-abi
+aiohttp
+websockets
+websocket-client
