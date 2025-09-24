@@ -19,9 +19,10 @@ DEFAULT_BALANCE_FRACTION = 0.2  # Use fraction of available balance for each ord
 POSITION_THRESHOLD_USD = 15.0  # Fixed USD value threshold for position closure
 
 # TIMING (in seconds)
-ORDER_REFRESH_INTERVAL = 1.0     # How long to wait before cancelling an unfilled order.
+ORDER_REFRESH_INTERVAL = 0.5    # How long to wait before cancelling an unfilled order.
 RETRY_ON_ERROR_INTERVAL = 30    # How long to wait after a major error before retrying.
-PRICE_REPORT_INTERVAL = 60      # How often to report current prices and spread.
+PRICE_REPORT_INTERVAL = 60      # How often to report current prices and spread to terminal.
+BALANCE_REPORT_INTERVAL = 30    # How often to report account balance to terminal.
 
 # ORDER REUSE SETTINGS
 DEFAULT_PRICE_CHANGE_THRESHOLD = 0.001  # minimum price change to cancel and replace order
@@ -31,7 +32,7 @@ CANCEL_SPECIFIC_ORDER = True # If True, cancel specific order ID. If False, canc
 
 # LOGGING
 LOG_FILE = 'market_maker.log'
-RELEASE_MODE = False  # When True, suppress all non-error logs and prints
+RELEASE_MODE = True  # When True, suppress all non-error logs and prints
 
 # Global variables for price data and rate limiting
 price_last_updated = None
@@ -194,8 +195,8 @@ async def keepalive_balance_listen_key(state, client):
 
     while not shutdown_requested and state.balance_listen_key:
         try:
-            # Sleep for 50 minutes (listen key expires in 60 minutes)
-            await asyncio.sleep(3000)
+            # Sleep for 10 minutes (listen key expires in 60 minutes)
+            await asyncio.sleep(600)
 
             if shutdown_requested or not state.balance_listen_key:
                 break
@@ -327,6 +328,7 @@ async def websocket_user_data_updater(state, client):
 
 
 async def balance_reporter(state):
+    global BALANCE_REPORT_INTERVAL
     """Periodically reports current account balance (only when not in release mode)."""
     log = logging.getLogger('BalanceReporter')
 
@@ -337,7 +339,7 @@ async def balance_reporter(state):
 
     while not shutdown_requested:
         try:
-            await asyncio.sleep(30)  # Report every 30 seconds
+            await asyncio.sleep(BALANCE_REPORT_INTERVAL)  # Report every 30 seconds
 
             if not shutdown_requested and is_balance_data_valid(state):
                 log.info(f"Account Balance: USDF={state.usdf_balance:.4f}, USDT={state.usdt_balance:.4f}, Total=${state.account_balance:.4f}")
