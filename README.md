@@ -81,20 +81,20 @@ RELEASE_MODE = True                     # True = prints errors only, False = pri
 *Future updates may include dynamic spread models (Avellaneda-Stoikov, Cartea-Jaimungal, or other alternatives) for automated spread optimization.*
 
 ## Other scripts
-Python scripts in folder `test`, may need to be together with `api_client.py` to work.
+Python scripts in folder `test`, may need to be together with `api_client.py`, and a `.env` with valid API keys to work.
 
 ```bash
-# Live order monitoring (detailed view - orders on ASTER website are too fast to see properly)
+# Live order monitoring (detailed view - orders are spammed too quickly to be seen properly on ASTER DEX website)
 python websocket_orders.py
 
 # Market data utilities
 python get_price.py ETHUSDT
 python get_trades.py ETHUSDT --limit 50
 
-# Optional monitoring
+# Order monitoring
 python websocket_user_data.py
 
-# Testing scripts may need `api_client.py` and/or valid APU keys in `.env`)
+# Testing scripts
 python test_balance.py                          # Quick balance check
 python test_account_balance.py                  # Extended 3-minute balance monitoring
 python test_cancel_order.py                     # Test order cancellation functionality
