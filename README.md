@@ -92,7 +92,7 @@ python get_trades.py ETHUSDT --limit 50
 # Optional monitoring
 python websocket_user_data.py
 
-# Testing scripts (various locations)
+# Testing scripts may need `api_client.py` and/or valid APU keys in `.env`)
 python test_balance.py                          # Quick balance check
 python test_account_balance.py                  # Extended 3-minute balance monitoring
 python test_cancel_order.py                     # Test order cancellation functionality
