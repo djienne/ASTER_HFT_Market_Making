@@ -5,6 +5,7 @@ A simple Python high frequency market making bot for the Aster Finance DEX platf
 Referral link to support this work: [https://www.asterdex.com/en/referral/164f81](https://www.asterdex.com/en/referral/164f81) Earn 10% rebate (I put maximum for you).
 
 **How it works**: The bot performs "ping-pong" trading by placing buy and sell limit orders around the current market price using a fraction of your available capital in the perpetual futures account. When one order fills, it immediately places a new order on the opposite side to capture the spread.
+Defaults to +-0.6% spreads.
 
 ## Quick Start
 
@@ -16,7 +17,7 @@ pip install -r requirements.txt
 cp .env.example .env
 
 # Run the market maker
-python market_maker.py --symbol ETHUSDT
+python market_maker.py --symbol ASTERUSDT
 ```
 
 ## Configuration
