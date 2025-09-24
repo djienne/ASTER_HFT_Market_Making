@@ -67,6 +67,7 @@ RELEASE_MODE = True                     # True = prints errors only, False = pri
 **Important info about Parameters**:
 - **`DEFAULT_BALANCE_FRACTION`**: Controls order sizing - with 0.2 (20%), each order uses 20% of your available balance. Lower values = smaller orders, higher values = larger orders but more risk.
 - **`POSITION_THRESHOLD_USD`**: When your net position exceeds this USD value ($15 default), the bot will only place orders to reduce the position (no new position building). Helps manage inventory risk.
+- **`LEVERAGE`**: Leverage to use to allow position sizes larger than the account available capital (margin). BE VERY CAREFUL WITH THAT. RECOMMENDED TO ALWAYS LEAVE TO 1.
 
 **Account Recommendation**: Use a **dedicated account** for the bot to avoid conflicts with manual trading and ensure accurate balance calculations.
 
