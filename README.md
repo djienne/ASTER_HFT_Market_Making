@@ -40,7 +40,7 @@ APIV1_PUBLIC_KEY=...     # API key for user data streams
 APIV1_PRIVATE_KEY=...    # API secret for user data streams
 ```
 
-### Trading Parameters (`market_maker.py`)
+### Main Parameters (`market_maker.py`)
 ```python
 DEFAULT_SYMBOL = "ETHUSDT"              # Trading pair
 DEFAULT_BUY_SPREAD = 0.006              # 0.6% below mid-price
