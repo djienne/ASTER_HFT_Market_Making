@@ -49,7 +49,7 @@ DEFAULT_BUY_SPREAD = 0.006              # 0.6% below mid-price
 DEFAULT_SELL_SPREAD = 0.006             # 0.6% above mid-price
 DEFAULT_BALANCE_FRACTION = 0.2          # Use 20% of balance per order
 POSITION_THRESHOLD_USD = 15.0           # position size threshold in USD; below it will consider it is not really an open position,
-                                        # above it will switch to sell mode.
+                                        # above it will switch to sell mode (like if it was fully filled).
 
 # Order Management
 ORDER_REFRESH_INTERVAL = 1              # Cancel and replace unfilled orders after 1 second
