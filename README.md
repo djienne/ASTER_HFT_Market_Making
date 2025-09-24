@@ -50,7 +50,8 @@ POSITION_THRESHOLD_USD = 15.0           # position size threshold in USD; below 
 
 # Order Management
 ORDER_REFRESH_INTERVAL = 1              # Cancel and replace unfilled orders after 1 second
-DEFAULT_PRICE_CHANGE_THRESHOLD = 0.001  # Min price change to cancel and replace order (0.1%)
+DEFAULT_PRICE_CHANGE_THRESHOLD = 0.001  # Min price change to cancel and replace order (0.1%),
+                                        # to avoid unecessary cancel/open order API calls
 
 # Logging
 RELEASE_MODE = True                     # True = errors only, False = detailed logs
