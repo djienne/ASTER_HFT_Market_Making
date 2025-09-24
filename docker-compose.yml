@@ -1,0 +1,32 @@
+version: '3.8'
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.12.48.0/22
+services:
+  data-collector:
+    build: .
+    container_name: aster_data_collector
+    volumes:
+      - ./ASTER_data:/app/ASTER_data
+      - ./data_collector.py:/app/data_collector.py:ro
+      - ./api_client.py:/app/api_client.py:ro
+    restart: unless-stopped
+
+  market-maker:
+    build: .
+    container_name: aster_market_maker
+    command: python market_maker.py --symbol ASTERUSDT
+    volumes:
+      - ./ASTER_data:/app/ASTER_data
+      - ./params:/app/params
+      - ./market_maker.py:/app/market_maker.py:ro
+      - ./api_client.py:/app/api_client.py:ro
+      - ./calculate_avellaneda_parameters.py:/app/calculate_avellaneda_parameters.py:ro
+    env_file:
+      - .env
+    depends_on:
+      - data-collector
+    restart: unless-stopped
