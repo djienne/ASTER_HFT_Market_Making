@@ -1,20 +1,5 @@
 version: '3.8'
-networks:
-  default:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.12.48.0/22
 services:
-  data-collector:
-    build: .
-    container_name: aster_data_collector
-    volumes:
-      - ./ASTER_data:/app/ASTER_data
-      - ./data_collector.py:/app/data_collector.py:ro
-      - ./api_client.py:/app/api_client.py:ro
-    restart: unless-stopped
-
   market-maker:
     build: .
     container_name: aster_market_maker
