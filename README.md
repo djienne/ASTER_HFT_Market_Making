@@ -54,7 +54,7 @@ DEFAULT_PRICE_CHANGE_THRESHOLD = 0.001  # Min price change to cancel and replace
                                         # to avoid unecessary cancel/open order API calls
 
 # Logging
-RELEASE_MODE = True                     # True = errors only, False = detailed logs,
+RELEASE_MODE = True                     # True = prints errors only, False = prints detailed logs (terminal and log file `market_maker.log`),
                                         # to reduce disk and CPU load, specially critical for VPS
 ```
 
