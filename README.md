@@ -85,28 +85,23 @@ Python scripts in folder `test`, may need to be together with `api_client.py` to
 # Live order monitoring (detailed view - orders on ASTER website are too fast to see properly)
 python websocket_orders.py
 
-# Main trading bot
-python market_maker.py --symbol ETHUSDT
-
 # Market data utilities
 python get_price.py ETHUSDT
 python get_trades.py ETHUSDT --limit 50
 
-# Testing
-python test_balance.py
-python test_account_balance.py
-
 # Optional monitoring
-python data_collector.py
 python websocket_user_data.py
 
-
-
-# Testing scripts (located in tests/ directory)
-python tests/test_balance.py
-python tests/test_account_balance.py
-python tests/test_cancel_order.py
-python tests/websocket_user_data.py
+# Testing scripts (various locations)
+python test_balance.py                          # Quick balance check
+python test_account_balance.py                  # Extended 3-minute balance monitoring
+python test_cancel_order.py                     # Test order cancellation functionality
+python websocket_user_data.py                   # Test user data stream connectivity
+python test_listen_key.py                       # Test listen key creation/renewal
+python test_price_threshold.py                  # Test price change threshold logic
+python demo_user_stream.py                      # Extended user stream demo (2 minutes)
+python websocket_user_data_simple.py            # Simple user data stream test
+and more...
 ```
 
 ## Docker Deployment
