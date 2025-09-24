@@ -125,7 +125,7 @@ docker-compose logs -f market-maker
 **Change trading symbol**: Edit the `command` line in `docker-compose.yml`
 ```yaml
 market-maker:
-  command: python market_maker.py --symbol ETHUSDT  # Default: ASTERUSDT
+  command: python market_maker.py --symbol ETHUSDT
 ```
 
 ## Performance Recommendations
