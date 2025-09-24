@@ -12,6 +12,4 @@ services:
       - ./calculate_avellaneda_parameters.py:/app/calculate_avellaneda_parameters.py:ro
     env_file:
       - .env
-    depends_on:
-      - data-collector
     restart: unless-stopped
