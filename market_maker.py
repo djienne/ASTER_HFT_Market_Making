@@ -12,14 +12,14 @@ from api_client import ApiClient
 # --- Configuration ---
 # STRATEGY
 DEFAULT_SYMBOL = "ASTERUSDT"
-DEFAULT_BUY_SPREAD = 0.006   # 0.6% below mid-price for buy orders
-DEFAULT_SELL_SPREAD = 0.006  # 0.6% above mid-price for sell orders
+DEFAULT_BUY_SPREAD = 0.005   # 0.6% below mid-price for buy orders
+DEFAULT_SELL_SPREAD = 0.005  # 0.6% above mid-price for sell orders
 DEFAULT_LEVERAGE = 1
 DEFAULT_BALANCE_FRACTION = 0.2  # Use fraction of available balance for each order
 POSITION_THRESHOLD_USD = 15.0  # USD threshold to switch to sell mode in case of partial order fill
 
 # TIMING (in seconds)
-ORDER_REFRESH_INTERVAL = 5.0    # How long to wait before cancelling an unfilled order.
+ORDER_REFRESH_INTERVAL = 0.5    # How long to wait before cancelling an unfilled order.
 RETRY_ON_ERROR_INTERVAL = 30    # How long to wait after a major error before retrying.
 PRICE_REPORT_INTERVAL = 60      # How often to report current prices and spread to terminal.
 BALANCE_REPORT_INTERVAL = 60    # How often to report account balance to terminal.
@@ -32,12 +32,12 @@ CANCEL_SPECIFIC_ORDER = True # If True, cancel specific order ID. If False, canc
 
 # LOGGING
 LOG_FILE = 'market_maker.log'
-RELEASE_MODE = False  # When True, suppress all non-error logs and prints
+RELEASE_MODE = True  # When True, suppress all non-error logs and prints
 
 # Global variables for price data and rate limiting
 price_last_updated = None
 last_order_time = 0
-MIN_ORDER_INTERVAL = 0.1  # Minimum seconds between order placements
+MIN_ORDER_INTERVAL = 0.05  # Minimum seconds between order placements
 
 
 def setup_logging(file_log_level):
@@ -242,7 +242,7 @@ async def keepalive_balance_listen_key(state, client):
     log.info("Balance keepalive task shutting down")
 
 
-async def websocket_user_data_updater(state, client):
+async def websocket_user_data_updater(state, client, symbol):
     """[MODIFIED] WebSocket-based user data updater for account and order updates."""
     log = logging.getLogger('UserDataUpdater')
     reconnect_delay = 5
@@ -309,6 +309,17 @@ async def websocket_user_data_updater(state, client):
                                 state.account_balance = state.usdf_balance + state.usdt_balance + state.usdc_balance
                                 state.balance_last_updated = asyncio.get_event_loop().time()
                                 log.info(f"Balance updated: USDF={state.usdf_balance:.4f}, USDT={state.usdt_balance:.4f}, USDC={state.usdc_balance:.4f}, Total=${state.account_balance:.4f}")
+
+                                # Also check for position updates in the same event
+                                positions = data.get('a', {}).get('P', [])
+                                for position in positions:
+                                    if position.get('s') == symbol:
+                                        new_position_size = float(position.get('pa', '0'))
+                                        # Only update and log if there's a meaningful change
+                                        if abs(state.position_size - new_position_size) > 1e-9:
+                                            log.info(f"Real-time position update for {symbol}: size changed from {state.position_size:.6f} to {new_position_size:.6f}")
+                                            state.position_size = new_position_size
+
                             
                             elif event_type == 'ORDER_TRADE_UPDATE':
                                 order_data = data.get('o', {})
@@ -903,7 +914,7 @@ async def main():
             mm_task = asyncio.create_task(market_making_loop(state, client, args))
             tasks = [
                 asyncio.create_task(websocket_price_updater(state, args.symbol)),
-                asyncio.create_task(websocket_user_data_updater(state, client)),
+                asyncio.create_task(websocket_user_data_updater(state, client, args.symbol)),
                 asyncio.create_task(balance_reporter(state)),
                 mm_task,
                 asyncio.create_task(price_reporter(state, args.symbol)),
