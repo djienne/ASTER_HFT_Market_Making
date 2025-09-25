@@ -297,7 +297,8 @@ async def websocket_user_data_updater(state, client, symbol):
                             event_type = data.get('e')
 
                             if event_type == 'ACCOUNT_UPDATE':
-                                balances = data.get('a', {}).get('B', [])
+                                account_data = data.get('a', {})
+                                balances = account_data.get('B', [])
                                 for balance in balances:
                                     if balance.get('a') == 'USDF':
                                         state.usdf_balance = float(balance.get('wb', '0'))
@@ -311,14 +312,29 @@ async def websocket_user_data_updater(state, client, symbol):
                                 log.info(f"Balance updated: USDF={state.usdf_balance:.4f}, USDT={state.usdt_balance:.4f}, USDC={state.usdc_balance:.4f}, Total=${state.account_balance:.4f}")
 
                                 # Also check for position updates in the same event
-                                positions = data.get('a', {}).get('P', [])
+                                positions = account_data.get('P', [])
                                 for position in positions:
                                     if position.get('s') == symbol:
                                         new_position_size = float(position.get('pa', '0'))
-                                        # Only update and log if there's a meaningful change
+                                        entry_price = float(position.get('ep', '0'))
+                                        notional_value = abs(new_position_size * entry_price)
+
+                                        # Only update and log if there's a meaningful change in position size
                                         if abs(state.position_size - new_position_size) > 1e-9:
                                             log.info(f"Real-time position update for {symbol}: size changed from {state.position_size:.6f} to {new_position_size:.6f}")
                                             state.position_size = new_position_size
+
+                                        # Update mode based on notional value
+                                        if notional_value < POSITION_THRESHOLD_USD:
+                                            if state.mode != 'BUY':
+                                                log.info(f"Position notional from WS (${notional_value:.2f}) is below threshold. Switching to BUY mode.")
+                                                state.mode = 'BUY'
+                                                # If we are switching to BUY mode, it implies we have no significant position.
+                                                state.position_size = 0.0
+                                        else:
+                                            if state.mode != 'SELL':
+                                                log.info(f"Position notional from WS (${notional_value:.2f}) is above threshold. Switching to SELL mode.")
+                                                state.mode = 'SELL'
 
                             
                             elif event_type == 'ORDER_TRADE_UPDATE':
@@ -477,6 +493,40 @@ async def market_making_loop(state, client, args):
                         log.error(f"Could not cancel order {state.active_order_id} during WS outage: {cancel_error}")
                 
                 await asyncio.sleep(5) # Wait before checking again
+                continue
+
+            # --- State Synchronization ---
+            # At the start of each loop, get the authoritative position state from the API
+            try:
+                log.debug("Synchronizing position state with the exchange...")
+                positions = await client.get_position_risk(args.symbol)
+                if positions:
+                    position = positions[0]
+                    current_position_size = float(position.get('positionAmt', 0.0))
+                    notional_value = abs(float(position.get('notional', 0.0)))
+
+                    # Update state based on fetched data
+                    state.position_size = current_position_size
+
+                    # If position is negligible, reset to BUY mode. Otherwise, set to SELL.
+                    if notional_value < POSITION_THRESHOLD_USD:
+                        if state.mode != 'BUY':
+                            log.info(f"Position notional (${notional_value:.2f}) is below threshold. Resetting to BUY mode.")
+                            state.mode = 'BUY'
+                        state.position_size = 0.0 # Reset position size to avoid tiny dust amounts causing issues
+                    else:
+                        if state.mode != 'SELL':
+                            log.info(f"Found significant position (size: {current_position_size}, notional: ${notional_value:.2f}). Switching to SELL mode.")
+                            state.mode = 'SELL'
+                else:
+                    # If no position data is returned, assume no position
+                    state.position_size = 0.0
+                    state.mode = 'BUY'
+                log.debug(f"State synchronized: position_size={state.position_size}, mode={state.mode}")
+            except Exception as e:
+                log.error(f"Failed to synchronize position state, relying on last known state. Error: {e}")
+                # If we fail to get the position, we should wait and retry rather than trading on stale data.
+                await asyncio.sleep(5)
                 continue
 
             # --- Secondary checks for fresh data ---
