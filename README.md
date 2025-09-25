@@ -1,8 +1,8 @@
-# ASTER DEX Simple High Frequency Market Making strategy with Python
+# Aster Finance DEX Simple High Frequency Market Making strategy with Python
 
-A simple Python high frequency market making bot for Aster DEX using websockets and Rest API calls.
+A simple Python high frequency market making bot for the Aster Finance DEX platform using websockets and Rest API calls.
 
-Referral link to support this work: [https://www.asterdex.com/en/referral/164f81](https://www.asterdex.com/en/referral/164f81) .\
+Referral link to support this work: [https://www.asterdex.com/en/referral/164f81](https://www.asterdex.com/en/referral/164f81) .
 Earn 10% rebate on fees (I put maximum for you).
 
 **How it works**: The bot performs "ping-pong" trading by placing buy and sell limit orders around the current market mid-price using a fraction of your available capital in the perpetual futures account. When one order fills (with a significant amount), it immediately places a new order on the opposite side to capture the spread.
@@ -104,6 +104,17 @@ python test_price_threshold.py                  # Test price change threshold lo
 python demo_user_stream.py                      # Extended user stream demo (2 minutes)
 python websocket_user_data_simple.py            # Simple user data stream test
 and more...
+```
+
+## Terminal Dashboard
+
+For a comprehensive, real-time overview of your account, use the `terminal_dashboard.py` script. It provides a unified dashboard displaying:
+- Account balances (stablecoins and others)
+- Open positions with unrealized PnL
+- Recent order activity
+
+```bash
+python terminal_dashboard.py
 ```
 
 ## Docker Deployment
