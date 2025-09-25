@@ -4,14 +4,20 @@
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
 import signal
 import time
 from contextlib import suppress
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from typing import Dict, Optional
+from urllib.parse import urlencode
 
+import aiohttp
+import hmac
+import hashlib
 import websockets
 from websockets.exceptions import ConnectionClosedOK
 from dotenv import load_dotenv
@@ -19,9 +25,19 @@ from dotenv import load_dotenv
 from api_client import ApiClient
 
 STABLE_ASSETS = ("USDT", "USDC", "USDF")
-MAX_ORDER_EVENTS = 6
+MAX_ORDER_EVENTS = 4
 REST_REFRESH_INTERVAL = 15
 MARK_STREAM_RETRY = 3
+SPOT_REFRESH_INTERVAL = 10
+SPOT_BASE_ASSET = "USDT"
+SPOT_USD_RATE = Decimal("1")
+SPOT_MIN_TOTAL = Decimal("0")
+SPOT_STABLE_QUOTES = ("USDT", "BUSD", "USDC", "USDD", "USD")
+SPOT_DISPLAY_ROWS = 4
+REALIZED_PNL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "realized_pnl.json")
+REALIZED_PNL_HISTORY_LIMIT = 2
+
+ACTIVE_ORDER_STATUSES = {"NEW", "PARTIALLY_FILLED", "PENDING_NEW", "ACCEPTED", "PENDING_CANCEL", "WORKING"}
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -46,6 +62,199 @@ def to_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _decimal(value: Optional[str]) -> Decimal:
+    if value in (None, ""):
+        return Decimal("0")
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return Decimal("0")
+
+
+def _format_decimal(value: Optional[Decimal], precision: int = 4) -> str:
+    if value is None:
+        return "--"
+    try:
+        normalized = float(value)
+    except (ValueError, TypeError):
+        return "--"
+    return f"{normalized:,.{precision}f}"
+
+
+class SpotBalanceFetcher:
+    """Async helper to retrieve and value spot balances."""
+
+    PRICE_CACHE_TTL = 5.0
+
+    def __init__(
+        self,
+        api_key: str,
+        api_secret: str,
+        base_asset: str = SPOT_BASE_ASSET,
+        usd_rate: Decimal = SPOT_USD_RATE,
+        min_total: Decimal = SPOT_MIN_TOTAL,
+        show_zero: bool = False,
+        session: Optional[aiohttp.ClientSession] = None,
+    ) -> None:
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.base_asset = base_asset.upper()
+        self.usd_rate = usd_rate
+        self.min_total = min_total
+        self.show_zero = show_zero
+
+        self.session = session or aiohttp.ClientSession()
+        self._owns_session = session is None
+        self.price_cache: Dict[str, tuple[Decimal, float]] = {}
+
+    async def aclose(self) -> None:
+        if self._owns_session and not self.session.closed:
+            await self.session.close()
+
+    def _sign(self, params: Dict[str, str]) -> Dict[str, str]:
+        query_string = urlencode(params, doseq=True)
+        signature = hmac.new(self.api_secret.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256)
+        signed = dict(params)
+        signed["signature"] = signature.hexdigest()
+        return signed
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        params: Optional[Dict[str, str]] = None,
+        signed: bool = False,
+    ) -> Dict[str, object]:
+        params = params.copy() if params else {}
+        headers = {"X-MBX-APIKEY": self.api_key, "User-Agent": "AsterTerminal/SpotBalance"}
+        if signed:
+            params.setdefault("recvWindow", "5000")
+            params["timestamp"] = str(int(time.time() * 1000))
+            params = self._sign(params)
+        url = f"https://sapi.asterdex.com{path}"
+        async with self.session.request(
+            method,
+            url,
+            params=params if method.upper() == "GET" else None,
+            data=params if method.upper() != "GET" else None,
+            headers=headers,
+        ) as response:
+            response.raise_for_status()
+            if response.content_type == "application/json":
+                return await response.json()
+            text = await response.text()
+            raise ValueError(f"Unexpected response type: {response.content_type} -> {text}")
+
+    async def get_account_balances(self) -> list[Dict[str, str]]:
+        payload = await self._request("GET", "/api/v1/account", signed=True)
+        balances = payload.get("balances", [])
+        if not isinstance(balances, list):
+            return []
+        return balances
+
+    async def get_price(self, symbol: str) -> Optional[Decimal]:
+        symbol = symbol.upper()
+        cached = self.price_cache.get(symbol)
+        now = time.monotonic()
+        if cached and now - cached[1] <= self.PRICE_CACHE_TTL:
+            return cached[0]
+        data = await self._request("GET", "/api/v1/ticker/price", params={"symbol": symbol})
+        price = data.get("price") if isinstance(data, dict) else None
+        if price is None:
+            return None
+        value = _decimal(price)
+        self.price_cache[symbol] = (value, now)
+        return value
+
+    async def _pair_price(self, base: str, quote: str) -> Optional[Decimal]:
+        if base == quote:
+            return Decimal("1")
+        direct_symbol = f"{base}{quote}"
+        price = await self.get_price(direct_symbol)
+        if price is not None:
+            return price
+        inverse_symbol = f"{quote}{base}"
+        inverse_price = await self.get_price(inverse_symbol)
+        if inverse_price is None or inverse_price == 0:
+            return None
+        return Decimal("1") / inverse_price
+
+    async def find_conversion_rate(self, asset: str, base_asset: str) -> Optional[Decimal]:
+        asset = asset.upper()
+        base_asset = base_asset.upper()
+        if asset == base_asset:
+            return Decimal("1")
+
+        direct_price = await self._pair_price(asset, base_asset)
+        if direct_price is not None:
+            return direct_price
+
+        bridge_assets = [base_asset] + [q for q in SPOT_STABLE_QUOTES if q not in {asset, base_asset}]
+        for middle in bridge_assets:
+            if middle == asset:
+                continue
+            first_leg = await self._pair_price(asset, middle)
+            if first_leg is None:
+                continue
+            if middle == base_asset:
+                return first_leg
+            second_leg = await self._pair_price(middle, base_asset)
+            if second_leg is None:
+                continue
+            return first_leg * second_leg
+        return None
+
+    async def fetch_snapshot(self) -> Dict[str, object]:
+        balances = await self.get_account_balances()
+        assets: list[Dict[str, object]] = []
+        total_base = Decimal("0")
+        total_usd = Decimal("0")
+
+        for balance in balances:
+            asset = balance.get("asset", "").upper()
+            if not asset:
+                continue
+            free_amt = _decimal(balance.get("free"))
+            locked_amt = _decimal(balance.get("locked"))
+            total_amt = free_amt + locked_amt
+
+            if not self.show_zero and total_amt <= self.min_total:
+                continue
+
+            entry: Dict[str, object] = {
+                "asset": asset,
+                "free": free_amt,
+                "locked": locked_amt,
+                "total": total_amt,
+                "price": None,
+                "base_value": None,
+                "usd_value": None,
+            }
+
+            if total_amt > 0:
+                conversion = await self.find_conversion_rate(asset, self.base_asset)
+                if conversion is not None:
+                    base_value = total_amt * conversion
+                    usd_value = base_value * self.usd_rate
+                    entry.update({
+                        "price": conversion,
+                        "base_value": base_value,
+                        "usd_value": usd_value,
+                    })
+                    total_base += base_value
+                    total_usd += usd_value
+
+            assets.append(entry)
+
+        assets.sort(key=lambda item: item["asset"])  # type: ignore[index]
+        return {
+            "base_asset": self.base_asset,
+            "usd_rate": self.usd_rate,
+            "total_base": total_base,
+            "total_usd": total_usd,
+            "assets": assets,
+        }
+
 class TerminalDashboard:
     """Maintains shared state for the combined account/order/price dashboard."""
 
@@ -54,18 +263,25 @@ class TerminalDashboard:
         credentials: Dict[str, Optional[str]],
         stop_event: asyncio.Event,
         refresh_interval: int = REST_REFRESH_INTERVAL,
+        spot_fetcher: Optional[SpotBalanceFetcher] = None,
     ) -> None:
         self.credentials = credentials
         self.stop_event = stop_event
         self.refresh_interval = refresh_interval
+        self.spot_fetcher = spot_fetcher
 
         self.balances: Dict[str, Dict[str, str]] = {
             asset: {"wallet_balance": "0", "cross_wallet_balance": "0", "last_change": "0"}
             for asset in STABLE_ASSETS
         }
         self.positions: Dict[str, Dict[str, float]] = {}
+        self.active_orders: Dict[str, Dict[str, object]] = {}
+        self.order_mid_snapshots: Dict[str, Dict[str, object]] = {}
         self.order_events = []
         self.mark_prices: Dict[str, Dict[str, float]] = {}
+        self.realized_pnl_total = 0.0
+        self.realized_pnl_history: list[Dict[str, object]] = []
+        self._last_persisted_pnl = 0.0
 
         self.account_update_count = 0
         self.order_update_count = 0
@@ -83,12 +299,34 @@ class TerminalDashboard:
         self._first_render = True
         self._last_book_render = 0.0
         self._book_render_interval = 0.3
+        self.spot_snapshot: Dict[str, object] = {
+            "base_asset": SPOT_BASE_ASSET,
+            "usd_rate": SPOT_USD_RATE,
+            "total_base": Decimal("0"),
+            "total_usd": Decimal("0"),
+            "assets": [],
+        }
+        self.spot_last_update: Optional[datetime] = None
+
+        self._load_realized_pnl()
 
     def _track_symbol(self, symbol: str) -> None:
         symbol = symbol.upper()
         if symbol and symbol not in self.mark_symbols:
             self.mark_symbols.add(symbol)
             self.mark_stream_event.set()
+
+    @staticmethod
+    def _summarize_exception(exc: Exception) -> str:
+        if isinstance(exc, aiohttp.ClientResponseError):
+            status = exc.status
+            message = exc.message or exc.__class__.__name__
+            return f"HTTP {status} {message}" if status else message
+        if isinstance(exc, aiohttp.ClientConnectionError):
+            return "Connection error"
+        if isinstance(exc, asyncio.TimeoutError):
+            return "Timeout"
+        return exc.__class__.__name__
 
     # ------------------------------------------------------------------
     # Snapshot helpers
@@ -100,12 +338,139 @@ class TerminalDashboard:
                 {"wallet_balance": "0", "cross_wallet_balance": "0", "last_change": "0"},
             )
 
-    def _update_mark_symbols(self) -> None:
-        symbols = {symbol for symbol, pos in self.positions.items() if pos.get("amount")}
+    def update_spot_snapshot(self, snapshot: Dict[str, object]) -> None:
+        self.spot_snapshot = snapshot
+        self.spot_last_update = datetime.now()
+        self.last_reason = "SPOT SNAPSHOT"
+
+
+    def _refresh_mark_symbols(self) -> None:
+        position_symbols = {symbol for symbol, pos in self.positions.items() if pos.get("amount")}
+        active_symbols = {
+            info.get("symbol", "").upper()
+            for info in self.active_orders.values()
+            if info and info.get("symbol")
+        }
+        snapshot_symbols = {sym.upper() for sym in self.order_mid_snapshots.keys() if sym}
+        symbols = (
+            {sym for sym in position_symbols if sym}
+            | {sym for sym in active_symbols if sym}
+            | snapshot_symbols
+        )
         if symbols != self.mark_symbols:
             self.mark_symbols = symbols
             self.mark_stream_event.set()
         self._first_render = True
+
+    @staticmethod
+    def _order_keys(order: Dict[str, object]) -> list[str]:
+        keys: list[str] = []
+        order_id = order.get("i") or order.get("orderId")
+        client_id = order.get("C") or order.get("c") or order.get("clientOrderId")
+        if order_id not in (None, ""):
+            keys.append(f"id:{order_id}")
+        if client_id not in (None, ""):
+            keys.append(f"client:{client_id}")
+        return keys
+
+    def _record_order_mid_snapshot(self, data: Dict[str, object]) -> None:
+        symbol = (data.get("symbol") or "").upper()
+        if not symbol:
+            return
+        recorded_at = time.monotonic()
+        snapshot = self.order_mid_snapshots.get(symbol, {}).copy()
+        snapshot.update(
+            {
+                "symbol": symbol,
+                "time": data.get("time") or snapshot.get("time") or datetime.now().strftime("%H:%M:%S"),
+                "status": data.get("status") or snapshot.get("status"),
+                "recorded_at": recorded_at,
+            }
+        )
+        self.order_mid_snapshots[symbol] = snapshot
+        self._track_symbol(symbol)
+
+    def _load_realized_pnl(self) -> None:
+        if not os.path.isfile(REALIZED_PNL_FILE):
+            self._last_persisted_pnl = self.realized_pnl_total
+            return
+        try:
+            with open(REALIZED_PNL_FILE, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            total_value = payload.get("total", 0.0)
+            try:
+                parsed_total = float(total_value)
+            except (TypeError, ValueError):
+                parsed_total = 0.0
+            if abs(parsed_total) > 1e-9:
+                self.realized_pnl_total = parsed_total
+        except (OSError, json.JSONDecodeError) as exc:
+            logging.getLogger("TerminalDashboard").warning(f"Failed to load realized PnL file: {exc}")
+        finally:
+            self._last_persisted_pnl = self.realized_pnl_total
+
+    def _persist_realized_pnl(self) -> None:
+        if abs(self.realized_pnl_total - self._last_persisted_pnl) < 1e-9:
+            return
+        payload = {"total": round(self.realized_pnl_total, 10)}
+        try:
+            with open(REALIZED_PNL_FILE, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            self._last_persisted_pnl = self.realized_pnl_total
+        except OSError as exc:
+            logging.getLogger("TerminalDashboard").warning(f"Failed to persist realized PnL: {exc}")
+
+    def _record_realized_pnl(self, entry: Dict[str, object]) -> None:
+        if entry.get("exec") != "TRADE":
+            return
+        pnl_delta = to_float(entry.get("realized"))
+        if abs(pnl_delta) < 1e-9:
+            return
+        self.realized_pnl_total += pnl_delta
+        record = {
+            "time": entry.get("time", "--"),
+            "symbol": entry.get("symbol", "N/A"),
+            "side": entry.get("side", "N/A"),
+            "pnl": pnl_delta,
+        }
+        self.realized_pnl_history.insert(0, record)
+        del self.realized_pnl_history[REALIZED_PNL_HISTORY_LIMIT:]
+        self._persist_realized_pnl()
+
+    def _update_active_orders(self, order: Dict[str, object], data: Dict[str, object]) -> None:
+        status = data.get("status")
+        self._record_order_mid_snapshot(data)
+        keys = set(self._order_keys(order))
+        if not keys:
+            return
+
+        if status in ACTIVE_ORDER_STATUSES:
+            existing = None
+            for key in keys:
+                existing = self.active_orders.get(key)
+                if existing:
+                    break
+            if existing is None:
+                existing = {"keys": set()}
+            existing_keys = set(existing.get("keys", set()))
+            merged_keys = existing_keys | keys
+            existing.update(data)
+            existing["keys"] = merged_keys
+            for key in merged_keys:
+                self.active_orders[key] = existing
+            return
+
+        # Order no longer active; remove any aliases for it.
+        existing = None
+        for key in keys:
+            existing = self.active_orders.get(key)
+            if existing:
+                break
+        if not existing:
+            return
+        aliases = set(existing.get("keys", set())) or keys
+        for key in aliases:
+            self.active_orders.pop(key, None)
 
     def _recalc_unrealized(self, symbol: str) -> None:
         symbol = symbol.upper()
@@ -159,7 +524,7 @@ class TerminalDashboard:
         self.latest_snapshot_time = datetime.now()
         self.margin_alerts.clear()
         self.last_reason = "REST SNAPSHOT"
-        self._update_mark_symbols()
+        self._refresh_mark_symbols()
 
     def handle_account_update(self, payload: Dict[str, object], event_time: int = 0) -> None:
         self.last_reason = payload.get("m", "ACCOUNT_UPDATE")
@@ -201,16 +566,17 @@ class TerminalDashboard:
 
         self.ensure_stable()
         self.latest_snapshot_time = datetime.now()
-        self._update_mark_symbols()
+        self._refresh_mark_symbols()
 
     def handle_order_update(self, order: Dict[str, object]) -> None:
         event_time = order.get("T") or order.get("O") or 0
         timestamp = (
             datetime.fromtimestamp(event_time / 1000).strftime("%H:%M:%S.%f")[:-3] if event_time else "--"
         )
+        symbol = order.get("s", "N/A").upper()
         entry = {
             "time": timestamp,
-            "symbol": order.get("s", "N/A"),
+            "symbol": symbol,
             "side": order.get("S", "N/A"),
             "status": order.get("X", "N/A"),
             "exec": order.get("x", "N/A"),
@@ -222,14 +588,31 @@ class TerminalDashboard:
             "last_fill_price": to_float(order.get("L")),
             "realized": to_float(order.get("rp")),
         }
-        self._track_symbol(entry["symbol"])
+        self._track_symbol(symbol)
         self.order_events.insert(0, entry)
         del self.order_events[MAX_ORDER_EVENTS:]
+        self._record_realized_pnl(entry)
+
+        active_payload = {
+            "symbol": symbol,
+            "side": entry["side"],
+            "status": entry["status"],
+            "qty": entry["qty"],
+            "filled": entry["filled"],
+            "price": entry["price"],
+            "avg": entry["avg"],
+            "type": order.get("o", "N/A"),
+            "time": timestamp,
+            "client_order_id": order.get("C") or order.get("c") or order.get("clientOrderId"),
+            "order_id": order.get("i") or order.get("orderId"),
+        }
+        self._update_active_orders(order, active_payload)
 
         self.order_update_count += 1
         if order.get("x") == "TRADE":
             self.trade_count += 1
         self.last_event_time = timestamp
+        self._refresh_mark_symbols()
 
     def handle_margin_call(self, payload: Dict[str, object], event_time: int = 0) -> None:
         timestamp = (
@@ -249,17 +632,6 @@ class TerminalDashboard:
     # ------------------------------------------------------------------
     # Rendering helpers
     # ------------------------------------------------------------------
-    def _prepare_frame(self) -> None:
-        if self._first_render:
-            if os.name == "nt":
-                os.system("")
-            sys.stdout.write("\033[2J\033[H")
-            sys.stdout.flush()
-            self._first_render = False
-        else:
-            sys.stdout.write("\033[H")
-            sys.stdout.flush()
-
     def render(self, status: str = "WAITING") -> None:
         now = datetime.now()
         uptime = now - self.start_time
@@ -286,41 +658,84 @@ class TerminalDashboard:
         )
 
         header = colorize("=== ASTER TERMINAL DASHBOARD ===", CYAN + BOLD if USE_COLOR else CYAN)
-        self._prepare_frame()
-        print(header)
-        print(
+        lines: list[str] = []
+
+        lines.append(header)
+        lines.append(
             f"Snapshot: {snapshot} | Rendered: {now.strftime('%Y-%m-%d %H:%M:%S')} | Status: "
             f"{colorize(status, YELLOW if status not in {'CONNECTED', 'IDLE'} else GREEN)}"
         )
-        print(
+        lines.append(
             f"Uptime: {int(uptime.total_seconds() // 60)}m {int(uptime.total_seconds() % 60)}s | "
             f"Last reason: {self.last_reason}"
         )
-        print()
+        lines.append("")
 
-        print(colorize("Account Summary", BOLD))
-        print(f"  Total Stablecoins: {stable_total:,.4f} USD")
-        print(f"  Total Unrealized PnL: {total_unrealized:,.4f} USD")
-        print(f"  Total Equity: {total_equity:,.4f} USD")
-        print()
+        lines.append(colorize("Account Summary", BOLD))
+        lines.append(f"  Total Stablecoins: {stable_total:,.4f} USD")
+        lines.append(f"  Total Unrealized PnL: {total_unrealized:,.4f} USD")
+        lines.append(f"  Total Equity: {total_equity:,.4f} USD")
+        lines.append("")
 
-        print(colorize("Stablecoin Breakdown:", BOLD))
-        for line in stable_lines:
-            print(line)
-        print(f"  Total Stablecoins: {stable_total:,.4f} USD")
+        lines.append(colorize("Stablecoin Breakdown:", BOLD))
+        lines.extend(stable_lines)
+        lines.append(f"  Total Stablecoins: {stable_total:,.4f} USD")
         if other_balances:
-            print()
-            print(colorize("Other Balances:", BOLD))
-            for line in other_balances:
-                print(line)
+            lines.append("")
+            lines.append(colorize("Other Balances:", BOLD))
+            lines.extend(other_balances)
 
-        print()
-        print(colorize("Open Positions:", BOLD))
+        lines.append("")
+        lines.append(colorize("Spot Wallet:", BOLD))
+        base_asset = str(self.spot_snapshot.get("base_asset", SPOT_BASE_ASSET)).upper()
+        total_base = self.spot_snapshot.get("total_base")
+        total_usd = self.spot_snapshot.get("total_usd")
+        usd_rate = self.spot_snapshot.get("usd_rate", Decimal("1"))
+        lines.append(f"  Total {base_asset}: {_format_decimal(total_base, 4)} {base_asset}")
+        lines.append(f"  Total USD: {_format_decimal(total_usd, 4)} USD (rate {_format_decimal(usd_rate, 4)})")
+        updated_text = self.spot_last_update.strftime('%H:%M:%S') if self.spot_last_update else '--'
+        lines.append(f"  Updated: {updated_text}")
+        lines.append(colorize("  Assets:", BOLD))
+
+        spot_assets = []
+        if self.spot_snapshot:
+            raw_assets = self.spot_snapshot.get("assets", [])
+            if isinstance(raw_assets, list):
+                spot_assets = list(raw_assets[:SPOT_DISPLAY_ROWS])
+
+        padded_assets = spot_assets + [None] * (SPOT_DISPLAY_ROWS - len(spot_assets))
+
+        for entry in padded_assets:
+            if entry:
+                asset = entry.get("asset", "-")
+                free_amt = entry.get("free")
+                locked_amt = entry.get("locked")
+                total_amt = entry.get("total")
+                base_value = entry.get("base_value")
+                usd_value = entry.get("usd_value")
+                price = entry.get("price")
+                price_label = _format_decimal(price, 3)
+                base_label = _format_decimal(base_value, 4)
+                usd_label = _format_decimal(usd_value, 2)
+                line = (
+                    f"  {asset:<6} free {_format_decimal(free_amt, 6):>12} | locked {_format_decimal(locked_amt, 6):>12} |"
+                    f" total {_format_decimal(total_amt, 6):>12} | px {price_label:>13} |"
+                    f" {base_label:>12} {base_asset:<4} | {usd_label:>12} USD"
+                )
+            else:
+                line = (
+                    f"  {'--':<6} free {'--':>12} | locked {'--':>12} |"
+                    f" total {'--':>12} | px {'--':>13} | {'--':>12} {base_asset:<4} | {'--':>12} USD"
+                )
+            lines.append(line)
+
+        lines.append("")
+        lines.append(colorize("Open Positions:", BOLD))
         if self.positions:
             header_row = (
                 f"{'Symbol':<10}{'Side':<6}{'Amount':>12}{'Entry':>12}{'Mark':>12}{'Mid':>12}{'Quote':>14}{'Unreal PnL':>14}{'Funding%':>10}"
             )
-            print(header_row)
+            lines.append(header_row)
             for symbol, pos in sorted(self.positions.items()):
                 amount = pos['amount']
                 side = "LONG" if amount > 0 else "SHORT"
@@ -370,15 +785,53 @@ class TerminalDashboard:
                     quote_text = quote_plain
                     pnl_text = pnl_plain
                 mark_cell = f"{mark_display:>12}"
-                print(
+                lines.append(
                     f"{symbol:<10}{side_cell}{amount_text}{entry_display}"
                     f"{mark_cell}{mid_display}{quote_text}{pnl_text} {funding_display}"
                 )
         else:
-            print(colorize('  None', DIM))
+            lines.append(colorize('  None', DIM))
 
-        print()
-        print(colorize("Recent Orders:", BOLD))
+        lines.append("")
+        lines.append(colorize("Active Order Mid Prices:", BOLD))
+        mid_entries = list(self.order_mid_snapshots.values())
+        if mid_entries:
+            mid_entries.sort(key=lambda item: item.get("recorded_at", 0), reverse=True)
+            for snapshot in mid_entries:
+                symbol = snapshot.get("symbol", "N/A")
+                mark_info = self.mark_prices.get(symbol, {})
+                mid_value = None
+                if isinstance(mark_info, dict):
+                    mid_value = mark_info.get("mid")
+                    if mid_value in (None, 0):
+                        mid_value = mark_info.get("mark")
+                mid_display = "--"
+                if mid_value not in (None, 0):
+                    mid_display = f"{mid_value:.3f}"
+                lines.append(f"  {symbol:<10} mid {mid_display:>10}")
+        else:
+            lines.append(colorize("  None", DIM))
+
+        lines.append("")
+        lines.append(colorize("Realized Trade PnL:", BOLD))
+        total_line = f"  Total: {self.realized_pnl_total:+.4f} USD"
+        if USE_COLOR:
+            total_color = GREEN if self.realized_pnl_total >= 0 else RED
+            total_line = colorize(total_line, total_color)
+        lines.append(total_line)
+        if self.realized_pnl_history:
+            for record in self.realized_pnl_history:
+                pnl_value = record.get("pnl", 0.0)
+                line = f"  {record.get('time', '--'):<8} {record.get('symbol', 'N/A'):<10} {pnl_value:+.4f} USD"
+                if USE_COLOR:
+                    pnl_color = GREEN if pnl_value >= 0 else RED
+                    line = colorize(line, pnl_color)
+                lines.append(line)
+        else:
+            lines.append(colorize("  No realized trades yet.", DIM))
+
+        lines.append("")
+        lines.append(colorize("Recent Orders:", BOLD))
         display_events = list(self.order_events[:MAX_ORDER_EVENTS])
         while len(display_events) < MAX_ORDER_EVENTS:
             display_events.append(None)
@@ -408,16 +861,12 @@ class TerminalDashboard:
                 pct_str = '--'
                 mark_info = self.mark_prices.get(symbol)
                 ref_price = None
-                mid_str = '--'
-                if mark_info:
-                    mid_val = mark_info.get('mid')
+                mark_str = '--'
+                if isinstance(mark_info, dict):
                     mark_val = mark_info.get('mark')
-                    if mid_val:
-                        ref_price = mid_val
-                        mid_str = f"{mid_val:.3f}"
-                    elif mark_val:
+                    if mark_val not in (None, 0):
                         ref_price = mark_val
-                        mid_str = f"{mark_val:.3f}"
+                        mark_str = f"{mark_val:.3f}"
                 if price_value and ref_price:
                     pct = (price_value - ref_price) / ref_price * 100
                     pct_str = f"{pct:+.2f}%"
@@ -425,29 +874,49 @@ class TerminalDashboard:
                         pct_color = GREEN if pct <= 0 else RED
                         pct_str = colorize(pct_str, pct_color)
                 pnl_str = pnl_label
-                print(
+                lines.append(
                     f"  {time_str:<8} {symbol:<10} {side_str:<5} {status_str:<13} ({exec_type:<8}) "
-                    f"qty {progress_str:<18} avg {avg_str:>7} limit {price_str:>8} mid {mid_str:>8} dev {pct_str:<9} pnl {pnl_str:<12}"
+                    f"qty {progress_str:<18} avg {avg_str:>7} limit {price_str:>8} mark {mark_str:>8} dev {pct_str:<9} pnl {pnl_str:<12}"
                 )
             else:
-                print(colorize("  -- waiting for order activity --", DIM))
+                lines.append(colorize("  -- waiting for order activity --", DIM))
 
-        print()
-        print(colorize("Alerts:", BOLD))
+        lines.append("")
+        lines.append(colorize("Alerts:", BOLD))
         if self.margin_alerts:
             for note in self.margin_alerts[-3:]:
-                print(colorize(f"  ! {note}", RED))
+                lines.append(colorize(f"  ! {note}", RED))
         else:
-            print(colorize("  None", DIM))
+            lines.append(colorize("  None", DIM))
 
-        print()
-        print(colorize("Stats:", BOLD))
-        print(
+        lines.append("")
+        lines.append(colorize("Stats:", BOLD))
+        lines.append(
             f"  Account updates: {self.account_update_count} | Order updates: {self.order_update_count} | Trades: {self.trade_count}"
         )
-        print(f"  Last event time: {self.last_event_time}")
-        print()
-        print(colorize("Press Ctrl+C to exit.", DIM))
+        lines.append(f"  Last event time: {self.last_event_time}")
+        lines.append("")
+        lines.append(colorize("Press Ctrl+C to exit.", DIM))
+
+        output = "\n".join(lines)
+
+        # Use a buffer to combine output and reduce write calls, hiding the cursor during redraw.
+        buffer = ["\033[?25l"]  # Hide cursor
+        if self._first_render:
+            if os.name == "nt":
+                os.system("")
+            buffer.append("\033[2J\033[H")  # Clear screen and move to home
+            self._first_render = False
+        else:
+            buffer.append("\033[H")  # Move to home
+
+        if not output.endswith("\n"):
+            output += "\n"
+        buffer.append(output)
+        buffer.append("\033[J")  # Clear rest of screen
+        buffer.append("\033[?25h")  # Show cursor
+
+        sys.stdout.write("".join(buffer))
         sys.stdout.flush()
 
     # ------------------------------------------------------------------
@@ -465,13 +934,38 @@ class TerminalDashboard:
                 self.update_from_snapshot(snapshot)
                 self.render("REST REFRESH")
             except Exception as exc:  # noqa: BLE001
-                self.last_reason = f"Refresh error: {exc}"
+                summary = self._summarize_exception(exc)
+                logging.getLogger("TerminalDashboard").warning("Refresh error: %s", exc)
+                self.last_reason = f"Refresh error ({summary})"
                 self.render("REFRESH ERROR")
             try:
                 await asyncio.wait_for(self.stop_event.wait(), timeout=self.refresh_interval)
             except asyncio.TimeoutError:
                 continue
         self.last_reason = "Refresh stopped"
+
+    async def spot_balance_worker(self) -> None:
+        if not self.spot_fetcher:
+            return
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    snapshot = await self.spot_fetcher.fetch_snapshot()
+                    self.update_spot_snapshot(snapshot)
+                    self.render("SPOT SNAPSHOT")
+                except Exception as exc:  # noqa: BLE001
+                    summary = self._summarize_exception(exc)
+                    logging.getLogger("TerminalDashboard").warning("Spot error: %s", exc)
+                    self.last_reason = f"Spot error ({summary})"
+                    self.render("SPOT ERROR")
+                try:
+                    await asyncio.wait_for(self.stop_event.wait(), timeout=SPOT_REFRESH_INTERVAL)
+                except asyncio.TimeoutError:
+                    continue
+        except asyncio.CancelledError:
+            raise
+        finally:
+            await self.spot_fetcher.aclose()
 
     async def mark_price_listener(self) -> None:
         while not self.stop_event.is_set():
@@ -561,7 +1055,9 @@ class TerminalDashboard:
                 self.render("MARK STREAM CLOSED")
                 await asyncio.sleep(MARK_STREAM_RETRY)
             except Exception as exc:  # noqa: BLE001
-                self.last_reason = f"Mark stream error: {exc}"
+                summary = self._summarize_exception(exc)
+                logging.getLogger("TerminalDashboard").warning("Mark stream error: %s", exc)
+                self.last_reason = f"Mark stream error ({summary})"
                 self.render("MARK STREAM ERROR")
                 await asyncio.sleep(MARK_STREAM_RETRY)
         self.last_reason = "Mark stream stopped"
@@ -603,7 +1099,9 @@ class TerminalDashboard:
             self.render("CONNECTION CLOSED")
         except Exception as exc:  # noqa: BLE001
             if not self.stop_event.is_set():
-                self.last_reason = f"Stream error: {exc}"
+                summary = self._summarize_exception(exc)
+                logging.getLogger("TerminalDashboard").warning("Stream error: %s", exc)
+                self.last_reason = f"Stream error ({summary})"
                 self.render("STREAM ERROR")
 
 
@@ -639,7 +1137,21 @@ async def run_dashboard(args: argparse.Namespace) -> None:
         "api_private_key": api_private_key,
     }
 
-    dashboard = TerminalDashboard(credentials, stop_event, refresh_interval=args.refresh_interval)
+    spot_fetcher = SpotBalanceFetcher(
+        apiv1_public,
+        apiv1_private,
+        base_asset=SPOT_BASE_ASSET,
+        usd_rate=SPOT_USD_RATE,
+        min_total=SPOT_MIN_TOTAL,
+        show_zero=False,
+    )
+
+    dashboard = TerminalDashboard(
+        credentials,
+        stop_event,
+        refresh_interval=args.refresh_interval,
+        spot_fetcher=spot_fetcher,
+    )
 
     async with ApiClient(api_user, api_signer, api_private_key) as client:
         snapshot = await client.signed_request("GET", "/fapi/v3/account", {})
@@ -659,8 +1171,9 @@ async def run_dashboard(args: argparse.Namespace) -> None:
     refresh_task = asyncio.create_task(dashboard.periodic_refresh())
     mark_task = asyncio.create_task(dashboard.mark_price_listener())
     stream_task = asyncio.create_task(dashboard.stream(ws_url))
+    spot_task = asyncio.create_task(dashboard.spot_balance_worker())
 
-    tasks = {refresh_task, mark_task, stream_task}
+    tasks = {refresh_task, mark_task, stream_task, spot_task}
     if args.duration > 0:
         duration_task = asyncio.create_task(asyncio.sleep(args.duration))
         tasks.add(duration_task)
@@ -691,7 +1204,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--duration",
         type=int,
-        default=3600,
+        default=360000,
         help="Seconds to run before auto exit (<=0 to run until interrupted)",
     )
     parser.add_argument(
@@ -705,7 +1218,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    asyncio.run(run_dashboard(args))
+    try:
+        asyncio.run(run_dashboard(args))
+    finally:
+        # Ensure the cursor is visible when the application exits.
+        sys.stdout.write("\033[?25h")
+        sys.stdout.flush()
 
 
 if __name__ == "__main__":
