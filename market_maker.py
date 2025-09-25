@@ -12,14 +12,14 @@ from api_client import ApiClient
 # --- Configuration ---
 # STRATEGY
 DEFAULT_SYMBOL = "ASTERUSDT"
-DEFAULT_BUY_SPREAD = 0.005   # 0.6% below mid-price for buy orders
-DEFAULT_SELL_SPREAD = 0.005  # 0.6% above mid-price for sell orders
+DEFAULT_BUY_SPREAD = 0.006   # 0.6% below mid-price for buy orders
+DEFAULT_SELL_SPREAD = 0.006  # 0.6% above mid-price for sell orders
 DEFAULT_LEVERAGE = 1
 DEFAULT_BALANCE_FRACTION = 0.2  # Use fraction of available balance for each order
 POSITION_THRESHOLD_USD = 15.0  # USD threshold to switch to sell mode in case of partial order fill
 
 # TIMING (in seconds)
-ORDER_REFRESH_INTERVAL = 0.5    # How long to wait before cancelling an unfilled order.
+ORDER_REFRESH_INTERVAL = 5.0    # How long to wait before cancelling an unfilled order.
 RETRY_ON_ERROR_INTERVAL = 30    # How long to wait after a major error before retrying.
 PRICE_REPORT_INTERVAL = 60      # How often to report current prices and spread to terminal.
 BALANCE_REPORT_INTERVAL = 60    # How often to report account balance to terminal.
@@ -32,7 +32,7 @@ CANCEL_SPECIFIC_ORDER = True # If True, cancel specific order ID. If False, canc
 
 # LOGGING
 LOG_FILE = 'market_maker.log'
-RELEASE_MODE = True  # When True, suppress all non-error logs and prints
+RELEASE_MODE = False  # When True, suppress all non-error logs and prints
 
 # Global variables for price data and rate limiting
 price_last_updated = None
