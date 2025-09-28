@@ -19,7 +19,7 @@ Earn 10% rebate on fees (I put maximum for you).
 pip install -r requirements.txt
 
 # Run data collector for at least 15 minutes
-python data_collector.py                # Collect real-time market data (check variable `LIST_MARKETS` to add or remove markets)
+python data_collector.py # Collect real-time market data (check variable `LIST_MARKETS` to add or remove markets)
 
 # run calculation of parameters
 python calculate_avellaneda_parameters.py --symbol BNBUSDT  # Calculate dynamic spreads
