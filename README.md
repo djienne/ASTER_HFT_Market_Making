@@ -78,6 +78,10 @@ APIV1_PRIVATE_KEY=...    # API secret for user data streams
 SYMBOL=BNBUSDT          # Trading pair (used by all services), the bot won't work without this one
 ```
 
+<img src="infos_API_p1.png" alt="Info API 1" width="600"/>
+<img src="infos_API_p2.png" alt="Info API 1" width="600"/>
+
+
 ### Main Parameters (`market_maker.py`)
 ```python
 # Strategy Settings
