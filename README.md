@@ -1,12 +1,12 @@
 # Aster Finance DEX Market Making strategy with Python
 
-A simple Python high frequency market making bot for the Aster Finance DEX platform using websockets and Rest API calls.
+A Python market making bot for the Aster Finance DEX platform using websockets and Rest API calls.
 
 Referral link to support this work: [https://www.asterdex.com/en/referral/164f81](https://www.asterdex.com/en/referral/164f81) .
 Earn 10% rebate on fees (I put maximum for you).
 
 **How it works**: The bot performs "ping-pong" trading by placing buy and sell limit orders around the current market mid-price using a fraction of your available capital in the perpetual futures account. When one order fills (with a significant amount), it immediately places a new order on the opposite side to capture the spread.
-Defaults to +-0.6% bid-ask spreads.
+Calculates dynamic bid-ask spread based on order-flow, and uses market trend identification to go short or long.
 
 ## Quick Start
 
