@@ -1,4 +1,4 @@
-# Aster Finance DEX Simple Market Making strategy with Python
+# Aster Finance DEX Market Making strategy with Python
 
 A simple Python high frequency market making bot for the Aster Finance DEX platform using websockets and Rest API calls.
 
