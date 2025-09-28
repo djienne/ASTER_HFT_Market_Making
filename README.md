@@ -23,7 +23,7 @@ python data_collector.py # Collect real-time market data (check variable `LIST_M
 
 # run calculation of parameters
 python calculate_avellaneda_parameters.py --symbol BNBUSDT  # Calculate dynamic spreads
-python find_trend.py --symbol BNBUSDT --interval 5m        # Trend analysis with SuperTrend
+python find_trend.py --symbol BNBUSDT --interval 5m        # Trend direction determination with SuperTrend
 
 # Configure API credentials (create .env file with your credentials)
 # See configuration section below for required variables
