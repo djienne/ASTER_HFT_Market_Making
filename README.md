@@ -142,7 +142,7 @@ python calculate_avellaneda_parameters.py --symbol BNBUSDT  # Calculate dynamic 
 python find_trend.py --symbol BNBUSDT --interval 5m        # Trend analysis with SuperTrend
 
 # Monitoring and utilities
-python terminal_dashboard.py            # Comprehensive account dashboard
+python terminal_dashboard.py            # Comprehensive account dashboard to check if everything is going well
 ```
 
 ## Terminal Dashboard
@@ -155,6 +155,8 @@ For a comprehensive, real-time overview of your account, use the `terminal_dashb
 ```bash
 python terminal_dashboard.py
 ```
+
+<img src="dashboard.png" alt="dashboard" width="600"/>
 
 ## Docker Deployment
 
