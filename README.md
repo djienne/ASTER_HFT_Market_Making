@@ -207,7 +207,7 @@ services:
   trend-finder:
     environment:
       - TREND_REFRESH_MINUTES=5  # Trend analysis interval
-      - TREND_INTERVAL=5m        # Candlestick interval
+      - TREND_INTERVAL=5m        # Candlestick timeframe
 ```
 
 ## Performance Recommendations
