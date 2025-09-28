@@ -156,7 +156,7 @@ For a comprehensive, real-time overview of your account, use the `terminal_dashb
 python terminal_dashboard.py
 ```
 
-View of the Dashboard:\
+View of the Dashboard:
 
 <img src="dashboard.png" alt="dashboard" width="800"/>
 
