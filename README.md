@@ -158,7 +158,7 @@ python terminal_dashboard.py
 
 View of the Dashboard:
 
-<img src="dashboard.png" alt="dashboard" width="800"/>
+<img src="dashboard.png" alt="dashboard" width="1000"/>
 
 ## Docker Deployment
 
