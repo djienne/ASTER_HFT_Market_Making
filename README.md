@@ -6,7 +6,11 @@ Referral link to support this work: [https://www.asterdex.com/en/referral/164f81
 Earn 10% rebate on fees (I put maximum for you).
 
 **How it works**: The bot performs "ping-pong" trading by placing buy and sell limit orders around the current market mid-price using a fraction of your available capital in the perpetual futures account. When one order fills (with a significant amount), it immediately places a new order on the opposite side to capture the spread.
-Calculates dynamic bid-ask spread based on order-flow, and uses market trend identification to go short or long.
+
+**Advanced Features**:
+- **Dynamic Spreads**: Avellaneda-Stoikov model for optimal spread calculation
+- **Trend Analysis**: SuperTrend indicator for directional bias
+- **Real-time Data**: WebSocket-based market data and balance monitoring
 
 ## Quick Start
 
@@ -14,14 +18,43 @@ Calculates dynamic bid-ask spread based on order-flow, and uses market trend ide
 # Install dependencies
 pip install -r requirements.txt
 
-# Configure API credentials (copy .env.example to .env and edit)
-cp .env.example .env
+# Run data collector for at least 15 minutes
+python data_collector.py                # Collect real-time market data (check variable `LIST_MARKETS` to add or remove markets)
 
-# find and copy/paste your API keys (see below)
+# run calculation of parameters
+python calculate_avellaneda_parameters.py --symbol BNBUSDT  # Calculate dynamic spreads
+python find_trend.py --symbol BNBUSDT --interval 5m        # Trend analysis with SuperTrend
 
-# Run the market maker
-python market_maker.py --symbol ASTERUSDT
+# Configure API credentials (create .env file with your credentials)
+# See configuration section below for required variables
+
+# Run the market maker (symbol is configured in .env file)
+python market_maker.py --symbol BNBUSDT
+
 ```
+
+## Dependencies
+
+The project requires the following Python packages (see `requirements.txt`):
+
+### Core Dependencies
+- **aiohttp**: Async HTTP client for API calls
+- **websockets & websocket-client**: WebSocket connectivity
+- **python-dotenv**: Environment variable management
+- **requests**: Synchronous HTTP requests
+
+### Blockchain Integration
+- **web3**: Ethereum utilities for signing
+- **eth_abi & eth_account**: Ethereum ABI encoding and account management
+
+### Data Analysis & Trading
+- **pandas & numpy**: Data manipulation and numerical computing
+- **scipy**: Scientific computing for mathematical models
+- **arch**: GARCH modeling for volatility estimation (fallback to moving std when it fails)
+- **pandas-ta**: Technical analysis indicators
+
+### User Interface
+- **colorama**: Terminal color output for better readability
 
 ## Configuration
 
@@ -35,36 +68,43 @@ You need to create both **API** and **Pro API** credentials on Aster Finance as 
 # API V3 (Ethereum-style) - for trading operations (from "Pro API")
 API_USER=0x...           # Main account wallet address
 API_SIGNER=0x...         # API wallet address
-API_PRIVATE_KEY=12...    # API wallet private key
+API_PRIVATE_KEY=0x...    # API wallet private key
 
 # API V1 (HMAC-style) - for user data streams (from "API")
 APIV1_PUBLIC_KEY=...     # API key for user data streams
 APIV1_PRIVATE_KEY=...    # API secret for user data streams
+
+# Trading Configuration
+SYMBOL=BNBUSDT          # Trading pair (used by all services), the bot won't work without this one
 ```
 
 ### Main Parameters (`market_maker.py`)
 ```python
-DEFAULT_SYMBOL = "ETHUSDT"              # Trading pair
-DEFAULT_BUY_SPREAD = 0.006              # 0.6% below mid-price
-DEFAULT_SELL_SPREAD = 0.006             # 0.6% above mid-price
+# Strategy Settings
+DEFAULT_SYMBOL = "BNBUSDT"              # Default trading pair (overridden by .env SYMBOL)
+FLIP_MODE = False                       # True for short-biased, False for long-biased
+DEFAULT_BUY_SPREAD = 0.006              # 0.6% below mid-price, fallback if Avellaneda fails
+DEFAULT_SELL_SPREAD = 0.006             # 0.6% above mid-price, fallback if Avellaneda fails
+USE_AVELLANEDA_SPREADS = True           # Use dynamic spreads from Avellaneda parameters
 DEFAULT_BALANCE_FRACTION = 0.2          # Use 20% of balance per order
-POSITION_THRESHOLD_USD = 15.0           # position size threshold in USD; below it will consider it is not really an open position,
-                                        # above it will switch to sell mode (like if it was fully filled).
+POSITION_THRESHOLD_USD = 15.0           # Position size threshold in USD
+
+# Timing Settings
+ORDER_REFRESH_INTERVAL = 30             # Cancel unfilled orders after 30 seconds
+PRICE_REPORT_INTERVAL = 60              # Price reporting frequency
+BALANCE_REPORT_INTERVAL = 60            # Balance reporting frequency
+
+# SuperTrend Integration
+USE_SUPERTREND_SIGNAL = True            # Use SuperTrend for dynamic flip_mode
+SUPERTREND_CHECK_INTERVAL = 600         # Check SuperTrend signal every 10 minutes
 
 # Order Management
-ORDER_REFRESH_INTERVAL = 1              # Cancel and replace unfilled orders after 1 second
-DEFAULT_PRICE_CHANGE_THRESHOLD = 0.001  # Min price change to cancel and replace order (0.1%),
-                                        # to avoid unecessary cancel/open order API calls
+DEFAULT_PRICE_CHANGE_THRESHOLD = 0.001  # Min price change to replace order (0.1%)
+CANCEL_SPECIFIC_ORDER = True            # Cancel specific orders vs all orders
 
 # Logging
-RELEASE_MODE = True                     # True = prints errors only, False = prints detailed logs (terminal and log file `market_maker.log`),
-                                        # to reduce disk and CPU load, specially critical for VPS
+RELEASE_MODE = True                     # True = errors only, False = detailed logs
 ```
-
-**Important**: This bot uses **fixed spreads** - you must determine your optimal spread values based on:
-- Market volatility and liquidity
-- Your risk tolerance and capital requirements
-- Backtesting and observation of market conditions
 
 **Important info about Parameters**:
 - **`DEFAULT_BALANCE_FRACTION`**: Controls order sizing - with 0.2 (20%), each order uses 20% of your available balance. Lower values = smaller orders, higher values = larger orders but more risk.
@@ -73,37 +113,32 @@ RELEASE_MODE = True                     # True = prints errors only, False = pri
 
 **Account Recommendation**: Use a **dedicated account** for the bot to avoid conflicts with manual trading and ensure accurate balance calculations.
 
-**Note**: The default ±0.6% spreads worked well for ASTERUSDT on September 24th, 2024, but:
-- Market conditions change over time - these values will likely need adjustment
-- Different trading pairs require different spread configurations
-- Always test and optimize spreads for your specific market and timeframe
+**Advanced Features**:
+- **Dynamic Spreads**: When `USE_AVELLANEDA_SPREADS = True`, the bot automatically calculates optimal spreads using the Avellaneda-Stoikov model
+- **SuperTrend Integration**: When `USE_SUPERTREND_SIGNAL = True`, the bot uses trend analysis to determine directional bias
+- **Real-time Balance Tracking**: WebSocket-based balance monitoring for accurate position sizing
 
-*Future updates may include dynamic spread models (Avellaneda-Stoikov, Cartea-Jaimungal, or other alternatives) for automated spread optimization.*
+**Note**: The default ±0.6% spreads work as fallback when dynamic models aren't available. The system now includes:
+- Avellaneda-Stoikov model for optimal spread calculation
+- SuperTrend analysis for market direction
+- Real-time parameter updates every 10 minutes
+- Risk management with position thresholds
 
-## Other scripts
-Python scripts in folder `test`, may need to be together with `api_client.py`, and a `.env` with valid API keys to work.
+## Available Scripts
 
+### Core Trading Components
 ```bash
-# Live order monitoring (detailed view - orders are spammed too quickly to be seen properly on ASTER DEX website)
-python websocket_orders.py
+# Main trading bot
+python market_maker.py                  # Start market maker with default symbol
+python market_maker.py --symbol BNBUSDT # Start with specific symbol
 
-# Market data utilities
-python get_price.py ETHUSDT
-python get_trades.py ETHUSDT --limit 50 # all trades executed, not only you (mostly not you)
+# Data collection and analysis
+python data_collector.py                # Collect real-time market data
+python calculate_avellaneda_parameters.py --symbol BNBUSDT  # Calculate dynamic spreads
+python find_trend.py --symbol BNBUSDT --interval 5m        # Trend analysis with SuperTrend
 
-# User data monitoring
-python websocket_user_data.py
-
-# Testing scripts
-python test_balance.py                          # Quick balance check
-python test_account_balance.py                  # Extended 3-minute balance monitoring
-python test_cancel_order.py                     # Test order cancellation functionality
-python websocket_user_data.py                   # Test user data stream connectivity
-python test_listen_key.py                       # Test listen key creation/renewal
-python test_price_threshold.py                  # Test price change threshold logic
-python demo_user_stream.py                      # Extended user stream demo (2 minutes)
-python websocket_user_data_simple.py            # Simple user data stream test
-and more...
+# Monitoring and utilities
+python terminal_dashboard.py            # Comprehensive account dashboard
 ```
 
 ## Terminal Dashboard
@@ -119,44 +154,64 @@ python terminal_dashboard.py
 
 ## Docker Deployment
 
+The system includes multiple containerized services that work together:
+
+### Services Available
+- **data-collector**: Real-time market data collection via WebSocket
+- **avellaneda-params**: Dynamic spread calculation using Avellaneda-Stoikov model
+- **market-maker**: Main trading bot with market making strategy
+- **trend-finder**: SuperTrend analysis for directional bias
+
+### Docker Commands
 ```bash
-# Build
+# Build all services
 docker-compose build
 
-# Build and run
-docker-compose up --build
+# Run all services
+docker-compose up -d
 
 # Run specific service
-docker-compose up market-maker
-
-# Background mode
-docker-compose up -d
+docker-compose up -d data-collector
+docker-compose up -d market-maker
 
 # View logs
 docker-compose logs -f market-maker
+docker-compose logs -f data-collector
+
+# Stop all services
+docker-compose down
 ```
 
-**Change the crypto pair to trade**: Edit the `command` line in `docker-compose.yml`
+### Configuration
+**Trading pair configuration**: Set `SYMBOL=BNBUSDT` in your `.env` file. All services will automatically use this symbol.
+
+**Service timing**: Configure refresh intervals in `docker-compose.yml`:
 ```yaml
-market-maker:
-  command: python market_maker.py --symbol ASTERUSDT
+services:
+  data-collector:
+    environment:
+      - RESTART_MINUTES=2        # Data collection restart interval (if fails)
+
+  avellaneda-params:
+    environment:
+      - PARAM_REFRESH_MINUTES=10 # Parameter calculation interval
+
+  trend-finder:
+    environment:
+      - TREND_REFRESH_MINUTES=5  # Trend analysis interval
+      - TREND_INTERVAL=5m        # Candlestick interval
 ```
 
 ## Performance Recommendations
 
-**Latency is critical** for market making success. For optimal performance:
+**Latency is critical** for market making success, specially if you rely on fast order rate (low `ORDER_REFRESH_INTERVAL`). For optimal performance:
 
 - **Recommended**: AWS Tokyo region (ap-northeast-1) with dedicated t3.small instance
 - **Why**: Close proximity to Aster Finance servers reduces order placement latency
 - **Alternative regions**: Singapore, Hong Kong for Asia-Pacific trading
 - Avoid shared/burstable instances during active trading periods
 
-**Order Update Frequency**: The more frequently you can update limit orders, the better your edge:
-- Default: 1 second (`ORDER_REFRESH_INTERVAL = 1`)
-- **Optimization**: Try reducing this value to increase update frequency
-- **Caution**: Don't go too low or you'll hit AsterDEX's rate limits
-- Test incrementally (e.g., 0.5s → 0.3s → 0.2s) to find your optimal balance. Don't forget to adjust other variables too (`MIN_ORDER_INTERVAL`, `RETRY_ON_ERROR_INTERVAL`, `asyncio.sleep` calls, ...)
-
 ---
 
-**⚠️ Risk Warning**: This is trading software that can lose money. Always test with small amounts and understand the risks involved in automated cryptocurrency trading.
+**⚠️ Risk Warning**: This trading software will likely lose money, even if it generates significant volume, because it isn’t competitive with professional firms. Always start with small amounts and make sure you understand the risks of automated cryptocurrency trading.
+
