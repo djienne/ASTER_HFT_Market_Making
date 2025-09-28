@@ -28,7 +28,7 @@ python find_trend.py --symbol BNBUSDT --interval 5m        # Trend direction det
 # Configure API credentials (create .env file with your credentials)
 # See configuration section below for required variables
 
-# Run the market maker (symbol is configured in .env file)
+# Run the market maker
 python market_maker.py --symbol BNBUSDT
 
 ```
