@@ -94,7 +94,7 @@ DEFAULT_BALANCE_FRACTION = 0.2          # Use 20% of balance per order
 POSITION_THRESHOLD_USD = 15.0           # Position size threshold in USD
 
 # Timing Settings
-ORDER_REFRESH_INTERVAL = 30             # Cancel unfilled orders after 30 seconds
+ORDER_REFRESH_INTERVAL = 30             # Cancel and replace unfilled orders after 30 seconds
 PRICE_REPORT_INTERVAL = 60              # Price reporting frequency
 BALANCE_REPORT_INTERVAL = 60            # Balance reporting frequency
 
