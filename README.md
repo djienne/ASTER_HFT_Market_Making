@@ -138,7 +138,7 @@ python market_maker.py --symbol BNBUSDT # Start with specific symbol
 
 # Data collection and analysis
 python data_collector.py                # Collect real-time market data
-python calculate_avellaneda_parameters.py --symbol BNBUSDT  # Calculate dynamic spreads
+python calculate_avellaneda_parameters.py --symbol BNBUSDT  # Calculate dynamic spreads (needs enough data collected)
 python find_trend.py --symbol BNBUSDT --interval 5m        # Trend analysis with SuperTrend
 
 # Monitoring and utilities
