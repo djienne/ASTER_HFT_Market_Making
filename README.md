@@ -156,7 +156,8 @@ For a comprehensive, real-time overview of your account, use the `terminal_dashb
 python terminal_dashboard.py
 ```
 
-<img src="dashboard.png" alt="dashboard" width="600"/>
+View of the Dashboard:
+<img src="dashboard.png" alt="dashboard" width="800"/>
 
 ## Docker Deployment
 
