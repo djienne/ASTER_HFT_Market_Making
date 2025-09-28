@@ -5,21 +5,24 @@ import logging
 import websockets
 import json
 import signal
+import time
 from decimal import Decimal, ROUND_DOWN
 from dotenv import load_dotenv
 from api_client import ApiClient
 
 # --- Configuration ---
 # STRATEGY
-DEFAULT_SYMBOL = "ASTERUSDT"
+DEFAULT_SYMBOL = "BNBUSDT"
+FLIP_MODE = False # True for short-biased (SELL first), False for long-biased (BUY first)
 DEFAULT_BUY_SPREAD = 0.006   # 0.6% below mid-price for buy orders
 DEFAULT_SELL_SPREAD = 0.006  # 0.6% above mid-price for sell orders
+USE_AVELLANEDA_SPREADS = True  # Toggle to pull spreads from Avellaneda parameter files
 DEFAULT_LEVERAGE = 1
 DEFAULT_BALANCE_FRACTION = 0.2  # Use fraction of available balance for each order
 POSITION_THRESHOLD_USD = 15.0  # USD threshold to switch to sell mode in case of partial order fill
 
 # TIMING (in seconds)
-ORDER_REFRESH_INTERVAL = 5.0    # How long to wait before cancelling an unfilled order.
+ORDER_REFRESH_INTERVAL = 30     # How long to wait before cancelling an unfilled order, in seconds.
 RETRY_ON_ERROR_INTERVAL = 30    # How long to wait after a major error before retrying.
 PRICE_REPORT_INTERVAL = 60      # How often to report current prices and spread to terminal.
 BALANCE_REPORT_INTERVAL = 60    # How often to report account balance to terminal.
@@ -27,17 +30,30 @@ BALANCE_REPORT_INTERVAL = 60    # How often to report account balance to termina
 # ORDER REUSE SETTINGS
 DEFAULT_PRICE_CHANGE_THRESHOLD = 0.001  # minimum price change to cancel and replace order
 
+# SUPERTREND INTEGRATION
+USE_SUPERTREND_SIGNAL = True  # Toggle to use Supertrend signal for dynamic flip_mode
+SUPERTREND_PARAMS_TEMPLATE = "supertrend_params_{}.json"
+SUPERTREND_CHECK_INTERVAL = 600 # Seconds between checking the signal file
+
 # ORDER CANCELLATION
 CANCEL_SPECIFIC_ORDER = True # If True, cancel specific order ID. If False, cancel all orders for the symbol.
 
 # LOGGING
 LOG_FILE = 'market_maker.log'
-RELEASE_MODE = False  # When True, suppress all non-error logs and prints
+RELEASE_MODE = True  # When True, suppress all non-error logs and prints
 
 # Global variables for price data and rate limiting
 price_last_updated = None
 last_order_time = 0
-MIN_ORDER_INTERVAL = 0.05  # Minimum seconds between order placements
+MIN_ORDER_INTERVAL = 1.0  # Minimum seconds between order placements
+
+# Spread configuration
+PARAMS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "params")
+AVELLANEDA_FILE_PREFIX = "avellaneda_parameters_"
+SPREAD_MIN_THRESHOLD = 0.00005  # 0.005%
+SPREAD_MAX_THRESHOLD = 0.02     # 2%
+SPREAD_CACHE_TTL_SECONDS = 10
+_SPREAD_CACHE = {}
 
 
 def setup_logging(file_log_level):
@@ -86,14 +102,15 @@ def setup_logging(file_log_level):
 
 class StrategyState:
     """A simple class to hold the shared state of the strategy."""
-    def __init__(self):
+    def __init__(self, flip_mode=False):
         self.bid_price = None
         self.ask_price = None
         self.mid_price = None
         self.active_order_id = None
         self.position_size = 0.0
         # Mode can be 'BUY' or 'SELL'
-        self.mode = 'BUY'
+        self.flip_mode = flip_mode
+        self.mode = 'SELL' if self.flip_mode else 'BUY'
         # Track last order details for reuse logic
         self.last_order_price = None
         self.last_order_side = None
@@ -107,9 +124,11 @@ class StrategyState:
         self.usdc_balance = 0.0
         # Queue for order updates from WebSocket
         self.order_updates = asyncio.Queue()
-        # [ADDED] WebSocket connection health flags
+        # WebSocket connection health flags
         self.price_ws_connected = False
         self.user_data_ws_connected = False
+        # Supertrend signal
+        self.supertrend_signal = None # Can be 1 (up) or -1 (down)
 
 
 async def websocket_price_updater(state, symbol):
@@ -325,16 +344,18 @@ async def websocket_user_data_updater(state, client, symbol):
                                             state.position_size = new_position_size
 
                                         # Update mode based on notional value
+                                        opening_mode = 'SELL' if state.flip_mode else 'BUY'
+                                        closing_mode = 'BUY' if state.flip_mode else 'SELL'
                                         if notional_value < POSITION_THRESHOLD_USD:
-                                            if state.mode != 'BUY':
-                                                log.info(f"Position notional from WS (${notional_value:.2f}) is below threshold. Switching to BUY mode.")
-                                                state.mode = 'BUY'
-                                                # If we are switching to BUY mode, it implies we have no significant position.
+                                            if state.mode != opening_mode:
+                                                log.info(f"Position notional from WS (${notional_value:.2f}) is below threshold. Switching to {opening_mode} mode.")
+                                                state.mode = opening_mode
+                                                # If we are switching to opening mode, it implies we have no significant position.
                                                 state.position_size = 0.0
                                         else:
-                                            if state.mode != 'SELL':
-                                                log.info(f"Position notional from WS (${notional_value:.2f}) is above threshold. Switching to SELL mode.")
-                                                state.mode = 'SELL'
+                                            if state.mode != closing_mode:
+                                                log.info(f"Position notional from WS (${notional_value:.2f}) is above threshold. Switching to {closing_mode} mode.")
+                                                state.mode = closing_mode
 
                             
                             elif event_type == 'ORDER_TRADE_UPDATE':
@@ -429,6 +450,84 @@ async def price_reporter(state, symbol):
     log.info("Price reporter shutting down")
 
 
+async def initialize_supertrend_signal(state, symbol):
+    """Reads the Supertrend signal file once at startup to set the initial state."""
+    log = logging.getLogger('SupertrendInitializer')
+    
+    # Determine the symbol for the filename (e.g., BTC from BTCUSDT)
+    filename_symbol = symbol[:-4] if symbol.endswith('USDT') else symbol
+    params_file = os.path.join(PARAMS_DIR, SUPERTREND_PARAMS_TEMPLATE.format(filename_symbol))
+
+    try:
+        if os.path.exists(params_file):
+            with open(params_file, 'r') as f:
+                data = json.load(f)
+            
+            initial_signal = data.get('current_signal', {}).get('trend')
+            
+            if initial_signal in [1, -1]:
+                state.supertrend_signal = initial_signal
+                # Update flip_mode based on the initial signal
+                # Downtrend (-1) -> flip_mode = True (short-biased)
+                # Uptrend (+1) -> flip_mode = False (long-biased)
+                new_flip_mode = (initial_signal == -1)
+                if state.flip_mode != new_flip_mode:
+                    state.flip_mode = new_flip_mode
+                    log.info(f"Initialized Supertrend signal to: {'UPTREND (+1)' if initial_signal == 1 else 'DOWNTREND (-1)'}")
+                    log.info(f"Initial strategy bias set by signal: FLIP_MODE -> {state.flip_mode}")
+                else:
+                    log.info(f"Initial Supertrend signal confirms default bias: FLIP_MODE -> {state.flip_mode}")
+            else:
+                log.warning(f"Invalid initial signal '{initial_signal}' in {params_file}. Using default FLIP_MODE={state.flip_mode}.")
+        else:
+            log.warning(f"Supertrend params file not found at {params_file}. Using default FLIP_MODE={state.flip_mode}.")
+    except Exception as e:
+        log.error(f"Error initializing Supertrend signal: {e}. Using default FLIP_MODE={state.flip_mode}.")
+
+
+async def supertrend_signal_updater(state, symbol):
+    """Periodically reads the Supertrend signal file and updates the strategy state."""
+    log = logging.getLogger('SupertrendUpdater')
+    
+    # Determine the symbol for the filename (e.g., BTC from BTCUSDT)
+    filename_symbol = symbol[:-4] if symbol.endswith('USDT') else symbol
+    params_file = os.path.join(PARAMS_DIR, SUPERTREND_PARAMS_TEMPLATE.format(filename_symbol))
+
+    while not shutdown_requested:
+        try:
+            if os.path.exists(params_file):
+                with open(params_file, 'r') as f:
+                    data = json.load(f)
+                
+                new_signal = data.get('current_signal', {}).get('trend')
+                
+                if new_signal in [1, -1]:
+                    if state.supertrend_signal != new_signal:
+                        state.supertrend_signal = new_signal
+                        log.info(f"Supertrend signal updated to: {'UPTREND (+1)' if new_signal == 1 else 'DOWNTREND (-1)'}")
+                else:
+                    log.warning(f"Invalid signal '{new_signal}' in {params_file}. Defaulting to UPTREND (+1).")
+                    state.supertrend_signal = 1 # Default to uptrend on invalid signal
+            else:
+                if state.supertrend_signal != 1: # Only log if it's a change
+                    log.warning(f"Supertrend params file not found at {params_file}. Defaulting to UPTREND (+1).")
+                    state.supertrend_signal = 1 # Default to uptrend if file not found
+
+            await asyncio.sleep(SUPERTREND_CHECK_INTERVAL)
+
+        except json.JSONDecodeError:
+            log.error(f"Error decoding JSON from {params_file}. Defaulting to UPTREND (+1).")
+            state.supertrend_signal = 1
+            await asyncio.sleep(SUPERTREND_CHECK_INTERVAL)
+        except Exception as e:
+            log.error(f"An error occurred in the Supertrend signal updater: {e}. Defaulting to UPTREND (+1).")
+            state.supertrend_signal = 1
+            await asyncio.sleep(SUPERTREND_CHECK_INTERVAL)
+    
+    log.info("Supertrend signal updater shutting down.")
+
+
+
 def round_down(value, precision):
     """Helper to round a value down to a given precision."""
     factor = 10 ** precision
@@ -450,6 +549,136 @@ def should_reuse_order(state, new_price, new_side, new_quantity, threshold=DEFAU
     return price_change_pct < threshold
 
 
+def _safe_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parameter_file_candidates(symbol):
+    symbol = (symbol or "").upper()
+    candidates = []
+
+    def add(candidate):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+
+    add(symbol)
+    for suffix in ("USDT", "USDC", "USDF", "USD1", "USD"):
+        if symbol.endswith(suffix) and len(symbol) > len(suffix):
+            add(symbol[:-len(suffix)])
+
+    return candidates
+
+
+def _extract_spread(limit_orders, key, mid_price, file_path):
+    log = logging.getLogger('SpreadLoader')
+    raw_percent = _safe_float(limit_orders.get(f"{key}_percent"))
+    raw_delta = _safe_float(limit_orders.get(key))
+    spread = None
+
+    if raw_percent is not None:
+        spread = raw_percent / 100.0
+    elif raw_delta is not None and mid_price and mid_price > 0:
+        spread = raw_delta / mid_price
+
+    if spread is None:
+        log.warning(f"Could not derive {key} from {file_path}; falling back to defaults.")
+        return None
+
+    if not (SPREAD_MIN_THRESHOLD <= spread <= SPREAD_MAX_THRESHOLD):
+        log.warning(
+            f"{key} spread {spread:.6f} from {file_path} is out of bounds; expected between "
+            f"{SPREAD_MIN_THRESHOLD:.6f} and {SPREAD_MAX_THRESHOLD:.6f}."
+        )
+        return None
+
+    return spread
+
+
+def _load_spread_overrides(symbol):
+    log = logging.getLogger('SpreadLoader')
+    for candidate in _parameter_file_candidates(symbol):
+        file_path = os.path.join(PARAMS_DIR, f"{AVELLANEDA_FILE_PREFIX}{candidate}.json")
+        if not os.path.isfile(file_path):
+            continue
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as file:
+                payload = json.load(file)
+        except Exception as exc:
+            log.warning(f"Failed to load {file_path}: {exc}")
+            continue
+
+        limit_orders = payload.get("limit_orders") or {}
+        mid_price = _safe_float(payload.get("market_data", {}).get("mid_price"))
+        if not mid_price or mid_price <= 0:
+            mid_price = _safe_float(payload.get("calculated_values", {}).get("reservation_price"))
+
+        buy_spread = _extract_spread(limit_orders, "delta_b", mid_price, file_path)
+        sell_spread = _extract_spread(limit_orders, "delta_a", mid_price, file_path)
+
+        if buy_spread is None and sell_spread is None:
+            log.warning(f"No usable spreads found in {file_path}; checking next candidate if available.")
+            continue
+
+        return buy_spread, sell_spread, file_path
+
+    return None, None, None
+
+
+def _get_spreads_for_symbol(symbol):
+    symbol_key = (symbol or "").upper() or DEFAULT_SYMBOL
+    now = time.time()
+    cached_entry = _SPREAD_CACHE.get(symbol_key)
+    if cached_entry and cached_entry.get("expires_at", 0) > now:
+        return cached_entry["buy"], cached_entry["sell"]
+
+    log = logging.getLogger('SpreadLoader')
+    buy_override, sell_override, source_path = _load_spread_overrides(symbol_key)
+
+    buy_spread = buy_override if buy_override is not None else DEFAULT_BUY_SPREAD
+    sell_spread = sell_override if sell_override is not None else DEFAULT_SELL_SPREAD
+
+    previous_signature = None
+    if cached_entry:
+        previous_signature = (
+            cached_entry.get("buy"),
+            cached_entry.get("sell"),
+            cached_entry.get("source_path")
+        )
+
+    _SPREAD_CACHE[symbol_key] = {
+        "buy": buy_spread,
+        "sell": sell_spread,
+        "expires_at": now + SPREAD_CACHE_TTL_SECONDS,
+        "source_path": source_path
+    }
+
+    current_signature = (buy_spread, sell_spread, source_path)
+    if current_signature != previous_signature:
+        if source_path:
+            source_name = os.path.basename(source_path)
+            if buy_override is not None and sell_override is not None:
+                log.info(
+                    f"Loaded spreads for {symbol_key} from {source_name}: "
+                    f"buy={buy_spread:.6f}, sell={sell_spread:.6f}"
+                )
+            else:
+                log.info(
+                    f"Using spreads for {symbol_key} from {source_name} with defaults: "
+                    f"buy={buy_spread:.6f}, sell={sell_spread:.6f}"
+                )
+        else:
+            log.info(
+                f"No Avellaneda parameter file found for {symbol_key}; "
+                f"using default spreads buy={buy_spread:.6f}, sell={sell_spread:.6f}"
+            )
+
+    return buy_spread, sell_spread
+
+
 def get_spreads(state):
     global DEFAULT_BUY_SPREAD, DEFAULT_SELL_SPREAD
     """
@@ -459,7 +688,11 @@ def get_spreads(state):
     :param state: The current strategy state.
     :return: A tuple of (buy_spread, sell_spread).
     """
-    return DEFAULT_BUY_SPREAD, DEFAULT_SELL_SPREAD
+    if not USE_AVELLANEDA_SPREADS:
+        return DEFAULT_BUY_SPREAD, DEFAULT_SELL_SPREAD
+
+    symbol = getattr(global_args, "symbol", DEFAULT_SYMBOL)
+    return _get_spreads_for_symbol(symbol)
 
 
 async def market_making_loop(state, client, args):
@@ -468,6 +701,9 @@ async def market_making_loop(state, client, args):
     log.info(f"Fetching trading rules for {args.symbol}...")
     symbol_filters = await client.get_symbol_filters(args.symbol)
     log.info(f"Filters loaded: {symbol_filters}")
+
+    opening_mode = 'SELL' if state.flip_mode else 'BUY'
+    closing_mode = 'BUY' if state.flip_mode else 'SELL'
 
     while not shutdown_requested:
         try:
@@ -492,8 +728,24 @@ async def market_making_loop(state, client, args):
                     except Exception as cancel_error:
                         log.error(f"Could not cancel order {state.active_order_id} during WS outage: {cancel_error}")
                 
-                await asyncio.sleep(5) # Wait before checking again
+                await asyncio.sleep(1) # Wait before checking again
                 continue
+
+            # --- Supertrend Signal Integration ---
+            if USE_SUPERTREND_SIGNAL and state.supertrend_signal is not None:
+                # Check if there is no significant open position
+                current_notional = abs(state.position_size * state.mid_price) if state.mid_price else 0
+                if current_notional < POSITION_THRESHOLD_USD:
+                    # Downtrend signal (-1) means we should be short-biased (SELL first) -> flip_mode = True
+                    # Uptrend signal (+1) means we should be long-biased (BUY first) -> flip_mode = False
+                    new_flip_mode = (state.supertrend_signal == -1)
+                    
+                    if state.flip_mode != new_flip_mode:
+                        log.info(f"Supertrend signal changed to {'DOWNTREND' if new_flip_mode else 'UPTREND'}.")
+                        log.info(f"Position is flat. Adjusting strategy bias: FLIP_MODE -> {new_flip_mode}")
+                        state.flip_mode = new_flip_mode
+                else:
+                    log.debug(f"Supertrend signal is {'DOWNTREND' if state.supertrend_signal == -1 else 'UPTREND'}, but position is open (${current_notional:.2f}). Holding current strategy bias.")
 
             # --- State Synchronization ---
             # At the start of each loop, get the authoritative position state from the API
@@ -508,25 +760,24 @@ async def market_making_loop(state, client, args):
                     # Update state based on fetched data
                     state.position_size = current_position_size
 
-                    # If position is negligible, reset to BUY mode. Otherwise, set to SELL.
                     if notional_value < POSITION_THRESHOLD_USD:
-                        if state.mode != 'BUY':
-                            log.info(f"Position notional (${notional_value:.2f}) is below threshold. Resetting to BUY mode.")
-                            state.mode = 'BUY'
+                        if state.mode != opening_mode:
+                            log.info(f"Position notional (${notional_value:.2f}) is below threshold. Resetting to {opening_mode} mode.")
+                            state.mode = opening_mode
                         state.position_size = 0.0 # Reset position size to avoid tiny dust amounts causing issues
                     else:
-                        if state.mode != 'SELL':
-                            log.info(f"Found significant position (size: {current_position_size}, notional: ${notional_value:.2f}). Switching to SELL mode.")
-                            state.mode = 'SELL'
+                        if state.mode != closing_mode:
+                            log.info(f"Found significant position (size: {current_position_size}, notional: ${notional_value:.2f}). Switching to {closing_mode} mode.")
+                            state.mode = closing_mode
                 else:
                     # If no position data is returned, assume no position
                     state.position_size = 0.0
-                    state.mode = 'BUY'
+                    state.mode = opening_mode
                 log.debug(f"State synchronized: position_size={state.position_size}, mode={state.mode}")
             except Exception as e:
                 log.error(f"Failed to synchronize position state, relying on last known state. Error: {e}")
                 # If we fail to get the position, we should wait and retry rather than trading on stale data.
-                await asyncio.sleep(5)
+                await asyncio.sleep(1)
                 continue
 
             # --- Secondary checks for fresh data ---
@@ -540,38 +791,54 @@ async def market_making_loop(state, client, args):
                 await asyncio.sleep(2)
                 continue
 
-            # --- Double-check position before entering BUY mode ---
-            if state.mode == 'BUY':
+            # --- Double-check position before entering opening mode ---
+            if state.mode == opening_mode:
                 try:
-                    log.debug("Double-checking position before placing BUY order...")
+                    log.debug(f"Double-checking position before placing {opening_mode} order...")
                     positions = await client.get_position_risk(args.symbol)
                     if positions:
                         position = positions[0]
                         current_position_size = float(position.get('positionAmt', 0.0))
                         notional_value = abs(float(position.get('notional', 0.0)))
+                        
+                        position_is_long = current_position_size > 0
+                        position_is_short = current_position_size < 0
 
-                        if current_position_size > 0 and notional_value > 15.0:
-                            log.info(f"Found existing LONG position of size {current_position_size} with notional ${notional_value:.2f} - switching to SELL mode")
+                        # If in normal mode (opening BUY) and we find a long position, switch to close.
+                        if not state.flip_mode and position_is_long and notional_value > POSITION_THRESHOLD_USD:
+                            log.info(f"Found existing LONG position of size {current_position_size} with notional ${notional_value:.2f} - switching to {closing_mode} mode")
                             state.position_size = current_position_size
-                            state.mode = 'SELL'
+                            state.mode = closing_mode
+                        # If in flip mode (opening SELL) and we find a short position, switch to close.
+                        elif state.flip_mode and position_is_short and notional_value > POSITION_THRESHOLD_USD:
+                            log.info(f"Found existing SHORT position of size {current_position_size} with notional ${notional_value:.2f} - switching to {closing_mode} mode")
+                            state.position_size = current_position_size
+                            state.mode = closing_mode
                 except Exception as e:
                     log.warning(f"Failed to double-check position, proceeding with current mode: {e}")
 
             # --- Determine Strategy and Parameters ---
             buy_spread, sell_spread = get_spreads(state)
-            if state.mode == 'SELL':
-                log.info(f"Position size is {state.position_size}. Entering SELL mode.")
-                side, reduce_only = "SELL", True
+            
+            if state.mode == closing_mode:
+                log.info(f"Position size is {state.position_size}. Entering {closing_mode} mode.")
+                side, reduce_only = closing_mode, True
                 quantity_to_trade = abs(state.position_size)
-                limit_price = state.mid_price * (1 + sell_spread)
-                log.debug(f"SELL mode parameters: side={side}, reduce_only={reduce_only}, quantity_to_trade={quantity_to_trade}, limit_price={limit_price}, spread={sell_spread}")
-            else: # BUY Mode
-                log.info("No significant position. Entering BUY mode.")
-                side, reduce_only = "BUY", False
+                if closing_mode == 'SELL':
+                    limit_price = state.mid_price * (1 + sell_spread)
+                else:  # closing_mode == 'BUY'
+                    limit_price = state.mid_price * (1 - buy_spread)
+                log.debug(f"{closing_mode} mode parameters: side={side}, reduce_only={reduce_only}, quantity_to_trade={quantity_to_trade}, limit_price={limit_price}")
+            else:  # Opening mode
+                log.info(f"No significant position. Entering {opening_mode} mode.")
+                side, reduce_only = opening_mode, False
                 order_amount_usd = state.account_balance * DEFAULT_BALANCE_FRACTION
                 quantity_to_trade = order_amount_usd / state.mid_price
-                limit_price = state.mid_price * (1 - buy_spread)
-                log.debug(f"BUY mode parameters: side={side}, reduce_only={reduce_only}, order_amount_usd={order_amount_usd:.2f}, quantity_to_trade={quantity_to_trade}, limit_price={limit_price}, spread={buy_spread}")
+                if opening_mode == 'BUY':
+                    limit_price = state.mid_price * (1 - buy_spread)
+                else:  # opening_mode == 'SELL'
+                    limit_price = state.mid_price * (1 + sell_spread)
+                log.debug(f"{opening_mode} mode parameters: side={side}, reduce_only={reduce_only}, order_amount_usd={order_amount_usd:.2f}, quantity_to_trade={quantity_to_trade}, limit_price={limit_price}")
 
             log.info(f"Calculated order parameters: side={side}, quantity={quantity_to_trade:.8f}, price={limit_price:.8f}, reduce_only={reduce_only}")
             current_spread = sell_spread if side == 'SELL' else buy_spread
@@ -643,33 +910,39 @@ async def market_making_loop(state, client, args):
                     previous_mode = state.mode
                     previous_position = state.position_size
 
-                    if state.mode == 'BUY':
-                        state.position_size += filled_qty
-                        state.mode = 'SELL'
-                        log.info(f"BUY fill processed: {previous_position:.6f} + {filled_qty:.6f} = {state.position_size:.6f}")
+                    if state.mode == opening_mode:  # An opening order was filled
+                        if opening_mode == 'BUY':
+                            state.position_size += filled_qty
+                        else:  # opening_mode == 'SELL'
+                            state.position_size -= filled_qty
+                        log.info(f"{opening_mode} fill processed: new position size {state.position_size:.6f}")
+                        state.mode = closing_mode  # Flip to closing mode
                         log.info(f"Mode change: {previous_mode} -> {state.mode}")
-                    else: # SELL
-                        state.position_size -= filled_qty
-                        position_threshold = POSITION_THRESHOLD_USD / state.mid_price
-                        log.debug(f"SELL fill: {previous_position:.6f} - {filled_qty:.6f} = {state.position_size:.6f}, threshold: {position_threshold:.6f}")
+                    else:  # A closing order was filled
+                        if closing_mode == 'SELL':
+                            state.position_size -= filled_qty
+                        else:  # closing_mode == 'BUY'
+                            state.position_size += filled_qty
+                        log.info(f"{closing_mode} fill processed: new position size {state.position_size:.6f}")
 
-                        if state.position_size < position_threshold:
-                            state.mode = 'BUY'
-                            log.info(f"SELL fill processed: {previous_position:.6f} - {filled_qty:.6f} = {state.position_size:.6f}")
-                            log.info(f"Position below threshold ({position_threshold:.6f}), mode change: {previous_mode} -> {state.mode}")
+                        # Check if position is mostly closed
+                        position_threshold_coins = POSITION_THRESHOLD_USD / state.mid_price
+                        if abs(state.position_size) < position_threshold_coins:
+                            state.mode = opening_mode  # Flip back to opening mode
+                            log.info(f"Position below threshold ({position_threshold_coins:.6f}), mode change: {previous_mode} -> {state.mode}")
                         else:
-                            log.info(f"SELL fill processed: {previous_position:.6f} - {filled_qty:.6f} = {state.position_size:.6f} (keeping SELL mode)")
+                            log.info(f"Position still above threshold, keeping {closing_mode} mode.")
 
                     # Clear order tracking after fill
                     state.last_order_price = None
                     state.last_order_side = None
                     state.last_order_quantity = None
                     log.debug("Adding 0.1s delay after order fill to avoid API rate limits")
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.01)
 
                 except asyncio.TimeoutError:
                     log.info(f"Reused order {state.active_order_id} not filled within {ORDER_REFRESH_INTERVAL}s. Will evaluate for replacement in next cycle.")
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.01)
 
                 continue  # Skip to next iteration
 
@@ -751,22 +1024,28 @@ async def market_making_loop(state, client, args):
                 previous_mode = state.mode
                 previous_position = state.position_size
 
-                if state.mode == 'BUY':
-                    state.position_size += filled_qty
-                    state.mode = 'SELL' # Flip to sell mode
-                    log.info(f"BUY fill processed: {previous_position:.6f} + {filled_qty:.6f} = {state.position_size:.6f}")
+                if state.mode == opening_mode:  # An opening order was filled
+                    if opening_mode == 'BUY':
+                        state.position_size += filled_qty
+                    else:  # opening_mode == 'SELL'
+                        state.position_size -= filled_qty
+                    log.info(f"{opening_mode} fill processed: new position size {state.position_size:.6f}")
+                    state.mode = closing_mode  # Flip to closing mode
                     log.info(f"Mode change: {previous_mode} -> {state.mode}")
-                else: # SELL
-                    state.position_size -= filled_qty
-                    position_threshold = POSITION_THRESHOLD_USD / state.mid_price
-                    log.debug(f"SELL fill: {previous_position:.6f} - {filled_qty:.6f} = {state.position_size:.6f}, threshold: {position_threshold:.6f}")
+                else:  # A closing order was filled
+                    if closing_mode == 'SELL':
+                        state.position_size -= filled_qty
+                    else:  # closing_mode == 'BUY'
+                        state.position_size += filled_qty
+                    log.info(f"{closing_mode} fill processed: new position size {state.position_size:.6f}")
 
-                    if state.position_size < position_threshold: # If position is mostly closed
-                        state.mode = 'BUY' # Flip back to buy mode
-                        log.info(f"SELL fill processed: {previous_position:.6f} - {filled_qty:.6f} = {state.position_size:.6f}")
-                        log.info(f"Position below threshold ({position_threshold:.6f}), mode change: {previous_mode} -> {state.mode}")
+                    # Check if position is mostly closed
+                    position_threshold_coins = POSITION_THRESHOLD_USD / state.mid_price
+                    if abs(state.position_size) < position_threshold_coins:
+                        state.mode = opening_mode  # Flip back to opening mode
+                        log.info(f"Position below threshold ({position_threshold_coins:.6f}), mode change: {previous_mode} -> {state.mode}")
                     else:
-                        log.info(f"SELL fill processed: {previous_position:.6f} - {filled_qty:.6f} = {state.position_size:.6f} (keeping SELL mode)")
+                        log.info(f"Position still above threshold, keeping {closing_mode} mode.")
 
                 # Clear order tracking after fill
                 state.last_order_price = None
@@ -774,8 +1053,8 @@ async def market_making_loop(state, client, args):
                 state.last_order_quantity = None
 
                 # Add a small delay to avoid hammering the API after fills
-                log.debug("Adding 0.1s delay after order fill to avoid API rate limits")
-                await asyncio.sleep(0.1)
+                log.debug("Adding 0.01s delay after order fill to avoid API rate limits")
+                await asyncio.sleep(0.01)
 
             except asyncio.TimeoutError:
                 log.info(f"Order {state.active_order_id} not filled within {ORDER_REFRESH_INTERVAL}s. Cancelling and refreshing.")
@@ -796,11 +1075,11 @@ async def market_making_loop(state, client, args):
                 state.last_order_quantity = None
 
                 log.debug("Adding 0.1s delay after order timeout to avoid API rate limits")
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.01)
 
         except asyncio.TimeoutError:
             log.warning("Timeout in main loop. Continuing...")
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.01)
         except Exception as e:
             log.error(f"An error occurred in the main loop: {e}", exc_info=True)
             log.error(f"Current state: mode={state.mode}, position_size={state.position_size}, active_order_id={state.active_order_id}")
@@ -893,6 +1172,7 @@ async def main():
 
     setup_logging("INFO")
     logging.info(f"Starting market maker with arguments: {args}")
+    logging.info(f"FLIP_MODE is set to: {FLIP_MODE}")
 
     load_dotenv()
     API_USER = os.getenv("API_USER")
@@ -909,7 +1189,7 @@ async def main():
 
     try:
         client = ApiClient(API_USER, API_SIGNER, API_PRIVATE_KEY, RELEASE_MODE)
-        state = StrategyState()
+        state = StrategyState(flip_mode=FLIP_MODE)
 
         async with client:
             try:
@@ -929,6 +1209,10 @@ async def main():
                 logging.error("Timed out while fetching initial balance. Cannot proceed.")
                 return
 
+            # Initialize Supertrend signal before checking positions or starting loops
+            if USE_SUPERTREND_SIGNAL:
+                await initialize_supertrend_signal(state, args.symbol)
+
             try:
                 logging.info(f"Checking for existing position for {args.symbol}...")
                 positions = await client.get_position_risk(args.symbol)
@@ -940,25 +1224,38 @@ async def main():
                     position_size = float(position.get('positionAmt', 0.0))
                     notional_value = abs(float(position.get('notional', 0.0)))
 
-                    if position_size > 0 and notional_value > 15.0:
+                    position_is_long = position_size > 0
+                    position_is_short = position_size < 0
+
+                    # If in normal mode, look for a LONG position to close.
+                    if not state.flip_mode and position_is_long and notional_value > 15.0:
                         logging.info(f"Found existing LONG position of size {position_size} with notional value ${notional_value:.2f}.")
                         state.position_size = position_size
-                        state.mode = 'SELL'
+                        state.mode = 'SELL'  # Set to closing mode
                         logging.info(f"Starting in SELL mode to close position.")
+                        position_found = True
+                    # If in flip mode, look for a SHORT position to close.
+                    elif state.flip_mode and position_is_short and notional_value > 15.0:
+                        logging.info(f"Found existing SHORT position of size {position_size} with notional value ${notional_value:.2f}.")
+                        state.position_size = position_size
+                        state.mode = 'BUY'  # Set to closing mode
+                        logging.info(f"Starting in BUY mode to close position.")
                         position_found = True
 
                 if not position_found:
-                    logging.info("No significant existing long position found.")
+                    logging.info("No significant existing position found.")
                     try:
                         logging.info(f"Attempting to set leverage for {args.symbol} to {DEFAULT_LEVERAGE}x.")
                         await client.change_leverage(args.symbol, DEFAULT_LEVERAGE)
                         logging.info(f"Successfully set leverage for {args.symbol} to {DEFAULT_LEVERAGE}x.")
                     except Exception as e:
                         logging.error(f"Failed to set leverage: {e}", exc_info=True)
-                    logging.info("Starting in default BUY mode.")
+                    
+                    opening_mode = 'SELL' if state.flip_mode else 'BUY'
+                    logging.info(f"Starting in default {opening_mode} mode.")
 
             except Exception as e:
-                logging.warning(f"Could not check for existing position or set leverage, starting in default BUY mode: {e}", exc_info=True)
+                logging.warning(f"Could not check for existing position or set leverage, starting in default {state.mode} mode: {e}", exc_info=True)
 
             # Start all async tasks
             mm_task = asyncio.create_task(market_making_loop(state, client, args))
@@ -969,10 +1266,12 @@ async def main():
                 mm_task,
                 asyncio.create_task(price_reporter(state, args.symbol)),
             ]
+            if USE_SUPERTREND_SIGNAL:
+                tasks.append(asyncio.create_task(supertrend_signal_updater(state, args.symbol)))
 
             # Wait for either the market making task to complete or shutdown signal
             while not shutdown_requested and not mm_task.done():
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.01)
 
     except asyncio.CancelledError:
         logging.info("Main task was cancelled.")
