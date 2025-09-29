@@ -146,6 +146,8 @@ python find_trend.py --symbol BNBUSDT --interval 5m        # Trend analysis with
 
 # Monitoring and utilities
 python terminal_dashboard.py            # Comprehensive account dashboard to check if everything is going well
+python get_my_trading_volume.py --symbol BNBUSDT --days 7  # Get YOUR trading volume for last 7 days
+python get_my_trading_volume.py --days 30                  # Get trading volume across all symbols for last 30 days
 ```
 
 ## Terminal Dashboard
