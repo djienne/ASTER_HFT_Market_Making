@@ -22,7 +22,7 @@ pip install -r requirements.txt
 python data_collector.py # Collect real-time market data (check variable `LIST_MARKETS` to add or remove markets)
 
 # run calculation of parameters
-python calculate_avellaneda_parameters.py --symbol BNBUSDT --minutes 5  # Calculate dynamic spreads based on 5-minutes data chuncks (orders executed, bid-ask spreads)
+python calculate_avellaneda_parameters.py --symbol BNBUSDT --minutes 5  # Calculate dynamic spreads on BNBUSDT based on 5-minutes data chuncks (orders executed, bid-ask spreads)
 python find_trend.py --symbol BNBUSDT --interval 5m        # Trend direction determination with SuperTrend
 
 # Configure API credentials (create .env file with your credentials)
