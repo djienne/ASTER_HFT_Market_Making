@@ -25,10 +25,11 @@ python data_collector.py # Collect real-time market data (check variable `LIST_M
 python calculate_avellaneda_parameters.py --symbol BNBUSDT --minutes 5  # Calculate dynamic spreads on BNBUSDT based on 5-minutes data chuncks (orders executed, bid-ask spreads)
 python find_trend.py --symbol BNBUSDT --interval 5m  # Trend direction determination with SuperTrend based on 5-minutes kline candles
 
+# the above scripts do not need API credentials, but the market_maker.py does need it
 # Configure API credentials (create .env file with your credentials)
 # See configuration section below for required variables
 
-# Run the market maker
+# Run the market maker on BNBUSDT
 python market_maker.py --symbol BNBUSDT
 
 ```
