@@ -18,7 +18,7 @@ Earn 10% rebate on fees (I put maximum for you).
 # Install dependencies
 pip install -r requirements.txt
 
-# Run data collector for at least 15 minutes
+# Run data collector for at least 1 hour
 python data_collector.py # Collect real-time market data (check variable `LIST_MARKETS` to add or remove markets)
 
 # run calculation of parameters
