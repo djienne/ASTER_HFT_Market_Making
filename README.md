@@ -33,6 +33,8 @@ python market_maker.py --symbol BNBUSDT
 
 ```
 
+Use docker compose to run everything at once (see below).
+
 ## Dependencies
 
 The project requires the following Python packages (see `requirements.txt`):
