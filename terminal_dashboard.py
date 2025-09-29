@@ -9,6 +9,7 @@ import os
 import sys
 import signal
 import time
+import shutil
 from contextlib import suppress
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -48,6 +49,25 @@ CYAN = "\033[96m"
 YELLOW = "\033[93m"
 
 USE_COLOR = os.getenv("NO_COLOR") is None
+
+def enable_ansi_windows():
+    """Enables ANSI escape sequences in the Windows terminal."""
+    if os.name == 'nt':
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            # Set console mode to include ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+        except (ctypes.ArgumentError, OSError, AttributeError):
+            pass
+
+def get_terminal_size():
+    """Get terminal size, with fallback defaults."""
+    try:
+        size = shutil.get_terminal_size(fallback=(120, 40))
+        return size.columns, size.lines
+    except Exception:
+        return 120, 40
 
 def colorize(text: str, color: str) -> str:
     return f"{color}{text}{RESET}" if USE_COLOR else text
@@ -110,6 +130,13 @@ class SpotBalanceFetcher:
     async def aclose(self) -> None:
         if self._owns_session and not self.session.closed:
             await self.session.close()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.aclose()
+        return False
 
     def _sign(self, params: Dict[str, str]) -> Dict[str, str]:
         query_string = urlencode(params, doseq=True)
@@ -175,7 +202,7 @@ class SpotBalanceFetcher:
             return price
         inverse_symbol = f"{quote}{base}"
         inverse_price = await self.get_price(inverse_symbol)
-        if inverse_price is None or inverse_price == 0:
+        if inverse_price is None or inverse_price <= 0:
             return None
         return Decimal("1") / inverse_price
 
@@ -345,11 +372,14 @@ class TerminalDashboard:
 
 
     def _refresh_mark_symbols(self) -> None:
-        position_symbols = {symbol for symbol, pos in self.positions.items() if pos.get("amount")}
+        position_symbols = {
+            symbol for symbol, pos in self.positions.items()
+            if isinstance(pos, dict) and pos.get("amount")
+        }
         active_symbols = {
             info.get("symbol", "").upper()
             for info in self.active_orders.values()
-            if info and info.get("symbol")
+            if isinstance(info, dict) and info.get("symbol")
         }
         snapshot_symbols = {sym.upper() for sym in self.order_mid_snapshots.keys() if sym}
         symbols = (
@@ -587,6 +617,8 @@ class TerminalDashboard:
             "last_fill_qty": to_float(order.get("l")),
             "last_fill_price": to_float(order.get("L")),
             "realized": to_float(order.get("rp")),
+            "order_id": order.get("i") or order.get("orderId"),
+            "client_id": order.get("C") or order.get("c") or order.get("clientOrderId"),
         }
         self._track_symbol(symbol)
         self.order_events.insert(0, entry)
@@ -867,16 +899,22 @@ class TerminalDashboard:
                     if mark_val not in (None, 0):
                         ref_price = mark_val
                         mark_str = f"{mark_val:.3f}"
-                if price_value and ref_price:
+                if price_value and ref_price and ref_price != 0:
                     pct = (price_value - ref_price) / ref_price * 100
                     pct_str = f"{pct:+.2f}%"
                     if USE_COLOR:
                         pct_color = GREEN if pct <= 0 else RED
                         pct_str = colorize(pct_str, pct_color)
                 pnl_str = pnl_label
+                order_id = entry.get("order_id")
+                client_id = entry.get("client_id")
+                order_label = str(order_id) if order_id not in (None, "") else "--"
+                client_label = str(client_id) if client_id not in (None, "") else "--"
+                if order_label != "--":
+                    order_label = f"#{order_label}"
                 lines.append(
-                    f"  {time_str:<8} {symbol:<10} {side_str:<5} {status_str:<13} ({exec_type:<8}) "
-                    f"qty {progress_str:<18} avg {avg_str:>7} limit {price_str:>8} mark {mark_str:>8} dev {pct_str:<9} pnl {pnl_str:<12}"
+                    f"  {time_str:<8} {symbol:<10} {order_label:<13} {side_str:<5} {status_str:<13} ({exec_type:<8}) "
+                    f"qty {progress_str:<18} avg {avg_str:>7} limit {price_str:>8} mark {mark_str:>8} dev {pct_str:<9} pnl {pnl_str:<12} cid {client_label:<12}"
                 )
             else:
                 lines.append(colorize("  -- waiting for order activity --", DIM))
@@ -898,24 +936,35 @@ class TerminalDashboard:
         lines.append("")
         lines.append(colorize("Press Ctrl+C to exit.", DIM))
 
-        output = "\n".join(lines)
+        # Use an alternate screen buffer to completely prevent scrolling
+        buffer = []
 
-        # Use a buffer to combine output and reduce write calls, hiding the cursor during redraw.
-        buffer = ["\033[?25l"]  # Hide cursor
+        # Hide cursor before any writes
+        buffer.append("\033[?25l")
+
         if self._first_render:
-            if os.name == "nt":
-                os.system("")
-            buffer.append("\033[2J\033[H")  # Clear screen and move to home
+            # Switch to alternate screen buffer and clear it
+            buffer.append("\033[?1049h")  # Enable alternate screen
+            buffer.append("\033[2J")      # Clear screen
+            buffer.append("\033[H")       # Move to home
             self._first_render = False
         else:
-            buffer.append("\033[H")  # Move to home
+            # Just move to home position
+            buffer.append("\033[H")
 
-        if not output.endswith("\n"):
-            output += "\n"
-        buffer.append(output)
-        buffer.append("\033[J")  # Clear rest of screen
-        buffer.append("\033[?25h")  # Show cursor
+        # Write the content line by line
+        for line in lines:
+            buffer.append(line)
+            buffer.append("\033[K")  # Clear to end of line
+            buffer.append("\n")
 
+        # Clear from cursor to end of screen
+        buffer.append("\033[J")
+
+        # Show cursor after rendering
+        buffer.append("\033[?25h")
+
+        # Single atomic write to stdout
         sys.stdout.write("".join(buffer))
         sys.stdout.flush()
 
@@ -933,10 +982,16 @@ class TerminalDashboard:
                     snapshot = await client.signed_request("GET", "/fapi/v3/account", {})
                 self.update_from_snapshot(snapshot)
                 self.render("REST REFRESH")
-            except Exception as exc:  # noqa: BLE001
+            except asyncio.CancelledError:
+                raise
+            except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
                 summary = self._summarize_exception(exc)
                 logging.getLogger("TerminalDashboard").warning("Refresh error: %s", exc)
                 self.last_reason = f"Refresh error ({summary})"
+                self.render("REFRESH ERROR")
+            except Exception as exc:
+                logging.getLogger("TerminalDashboard").error("Unexpected refresh error: %s", exc, exc_info=True)
+                self.last_reason = f"Refresh error ({self._summarize_exception(exc)})"
                 self.render("REFRESH ERROR")
             try:
                 await asyncio.wait_for(self.stop_event.wait(), timeout=self.refresh_interval)
@@ -953,10 +1008,16 @@ class TerminalDashboard:
                     snapshot = await self.spot_fetcher.fetch_snapshot()
                     self.update_spot_snapshot(snapshot)
                     self.render("SPOT SNAPSHOT")
-                except Exception as exc:  # noqa: BLE001
+                except asyncio.CancelledError:
+                    raise
+                except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
                     summary = self._summarize_exception(exc)
                     logging.getLogger("TerminalDashboard").warning("Spot error: %s", exc)
                     self.last_reason = f"Spot error ({summary})"
+                    self.render("SPOT ERROR")
+                except Exception as exc:
+                    logging.getLogger("TerminalDashboard").error("Unexpected spot error: %s", exc, exc_info=True)
+                    self.last_reason = f"Spot error ({self._summarize_exception(exc)})"
                     self.render("SPOT ERROR")
                 try:
                     await asyncio.wait_for(self.stop_event.wait(), timeout=SPOT_REFRESH_INTERVAL)
@@ -996,12 +1057,17 @@ class TerminalDashboard:
                             return_when=asyncio.FIRST_COMPLETED,
                         )
                         for task in pending:
-                            task.cancel()
+                            if not task.done():
+                                task.cancel()
+                            with suppress(asyncio.CancelledError):
+                                await task
                         if stop_task in done:
-                            stop_task.result()
+                            with suppress(Exception):
+                                stop_task.result()
                             break
                         if change_task in done:
-                            change_task.result()
+                            with suppress(Exception):
+                                change_task.result()
                             break
                         message = recv_task.result()
                         data = json.loads(message)
@@ -1054,10 +1120,17 @@ class TerminalDashboard:
                 self.last_reason = "Mark stream closed"
                 self.render("MARK STREAM CLOSED")
                 await asyncio.sleep(MARK_STREAM_RETRY)
-            except Exception as exc:  # noqa: BLE001
+            except asyncio.CancelledError:
+                raise
+            except (aiohttp.ClientError, json.JSONDecodeError, websockets.WebSocketException) as exc:
                 summary = self._summarize_exception(exc)
                 logging.getLogger("TerminalDashboard").warning("Mark stream error: %s", exc)
                 self.last_reason = f"Mark stream error ({summary})"
+                self.render("MARK STREAM ERROR")
+                await asyncio.sleep(MARK_STREAM_RETRY)
+            except Exception as exc:
+                logging.getLogger("TerminalDashboard").error("Unexpected mark stream error: %s", exc, exc_info=True)
+                self.last_reason = f"Mark stream error ({self._summarize_exception(exc)})"
                 self.render("MARK STREAM ERROR")
                 await asyncio.sleep(MARK_STREAM_RETRY)
         self.last_reason = "Mark stream stopped"
@@ -1097,11 +1170,18 @@ class TerminalDashboard:
         except ConnectionClosedOK:
             self.last_reason = "Stream closed"
             self.render("CONNECTION CLOSED")
-        except Exception as exc:  # noqa: BLE001
+        except asyncio.CancelledError:
+            raise
+        except (aiohttp.ClientError, json.JSONDecodeError, websockets.WebSocketException) as exc:
             if not self.stop_event.is_set():
                 summary = self._summarize_exception(exc)
                 logging.getLogger("TerminalDashboard").warning("Stream error: %s", exc)
                 self.last_reason = f"Stream error ({summary})"
+                self.render("STREAM ERROR")
+        except Exception as exc:
+            if not self.stop_event.is_set():
+                logging.getLogger("TerminalDashboard").error("Unexpected stream error: %s", exc, exc_info=True)
+                self.last_reason = f"Stream error ({self._summarize_exception(exc)})"
                 self.render("STREAM ERROR")
 
 
@@ -1127,8 +1207,9 @@ async def run_dashboard(args: argparse.Namespace) -> None:
     apiv1_public = os.getenv("APIV1_PUBLIC_KEY")
     apiv1_private = os.getenv("APIV1_PRIVATE_KEY")
 
-    if not all([apiv1_public, apiv1_private]):
-        print("ERROR: Missing APIV1_PUBLIC_KEY or APIV1_PRIVATE_KEY")
+    if not all([api_user, api_signer, api_private_key, apiv1_public, apiv1_private]):
+        print("ERROR: Missing required environment variables")
+        print("Required: API_USER, API_SIGNER, API_PRIVATE_KEY, APIV1_PUBLIC_KEY, APIV1_PRIVATE_KEY")
         return
 
     credentials = {
@@ -1164,7 +1245,10 @@ async def run_dashboard(args: argparse.Namespace) -> None:
             api_key=apiv1_public,
             api_secret=apiv1_private,
         )
-        listen_key = response["listenKey"]
+        listen_key = response.get("listenKey")
+        if not listen_key:
+            print("ERROR: Failed to retrieve listenKey from API response")
+            return
 
     ws_url = f"wss://fstream.asterdex.com/ws/{listen_key}"
 
@@ -1193,7 +1277,8 @@ async def run_dashboard(args: argparse.Namespace) -> None:
     dashboard.mark_stream_event.set()
 
     for task in tasks:
-        task.cancel()
+        if not task.done():
+            task.cancel()
         with suppress(asyncio.CancelledError):
             await task
 
@@ -1217,12 +1302,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    enable_ansi_windows()
     args = parse_args()
     try:
         asyncio.run(run_dashboard(args))
     finally:
-        # Ensure the cursor is visible when the application exits.
-        sys.stdout.write("\033[?25h")
+        # Restore normal screen buffer and show cursor
+        sys.stdout.write("\033[?1049l")  # Disable alternate screen
+        sys.stdout.write("\033[?25h")    # Show cursor
         sys.stdout.flush()
 
 
