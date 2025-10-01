@@ -199,11 +199,10 @@ async def get_my_trading_volume(symbol: str = None, days: int = 7):
 
                 print(f"[INFO] Checking {len(top_symbols)} top symbols for your trades...")
 
-                for idx, sym in enumerate(top_symbols, 1):
-                    if idx % 10 == 0:
-                        print(f"[PROGRESS] Checked {idx}/{len(top_symbols)} symbols...")
+                # Define async function to fetch trades for a single symbol
+                async def fetch_symbol_trades(sym):
+                    """Fetch all trades for a single symbol."""
                     try:
-                        # Pagination for each symbol
                         all_trades_for_symbol = []
                         from_id = None
                         batch = 0
@@ -245,70 +244,75 @@ async def get_my_trading_volume(symbol: str = None, days: int = 7):
                                     if int(trades[-1]['time']) > end_time:
                                         break
 
-                                    await asyncio.sleep(0.05)  # Shorter delay for all-symbols scan
+                                    await asyncio.sleep(0.05)
                                 else:
                                     break
 
-                        trades = all_trades_for_symbol
-
-                        if trades:
-                            print(f"[INFO] Found {len(trades)} trades for {sym}")
-
-                            for trade in trades:
-                                qty = float(trade['qty'])
-                                price = float(trade['price'])
-                                quote_qty = qty * price
-                                trade_time = int(trade['time'])
-
-                                # Get the date for this trade
-                                trade_date = datetime.fromtimestamp(trade_time / 1000).strftime('%Y-%m-%d')
-
-                                if sym not in symbol_volumes:
-                                    symbol_volumes[sym] = {
-                                        'base_volume': 0.0,
-                                        'quote_volume': 0.0,
-                                        'trade_count': 0,
-                                        'buy_volume': 0.0,
-                                        'sell_volume': 0.0,
-                                        'buy_count': 0,
-                                        'sell_count': 0
-                                    }
-
-                                symbol_volumes[sym]['base_volume'] += qty
-                                symbol_volumes[sym]['quote_volume'] += quote_qty
-                                symbol_volumes[sym]['trade_count'] += 1
-                                total_quote_volume += quote_qty
-                                total_trades += 1
-
-                                # Track by day
-                                if trade_date not in daily_volumes:
-                                    daily_volumes[trade_date] = {
-                                        'quote_volume': 0.0,
-                                        'trade_count': 0,
-                                        'buy_volume': 0.0,
-                                        'sell_volume': 0.0,
-                                        'buy_count': 0,
-                                        'sell_count': 0
-                                    }
-
-                                daily_volumes[trade_date]['quote_volume'] += quote_qty
-                                daily_volumes[trade_date]['trade_count'] += 1
-
-                                # Track buy vs sell
-                                if trade['side'] == 'BUY':
-                                    symbol_volumes[sym]['buy_volume'] += quote_qty
-                                    symbol_volumes[sym]['buy_count'] += 1
-                                    daily_volumes[trade_date]['buy_volume'] += quote_qty
-                                    daily_volumes[trade_date]['buy_count'] += 1
-                                else:
-                                    symbol_volumes[sym]['sell_volume'] += quote_qty
-                                    symbol_volumes[sym]['sell_count'] += 1
-                                    daily_volumes[trade_date]['sell_volume'] += quote_qty
-                                    daily_volumes[trade_date]['sell_count'] += 1
+                        return sym, all_trades_for_symbol
 
                     except Exception as e:
-                        # Silently skip symbols with no trades or errors
-                        continue
+                        # Return empty list on error
+                        return sym, []
+
+                # Fetch all symbols concurrently
+                results = await asyncio.gather(*[fetch_symbol_trades(sym) for sym in top_symbols])
+
+                # Process results
+                for sym, trades in results:
+                    if trades:
+                        print(f"[INFO] Found {len(trades)} trades for {sym}")
+
+                        for trade in trades:
+                            qty = float(trade['qty'])
+                            price = float(trade['price'])
+                            quote_qty = qty * price
+                            trade_time = int(trade['time'])
+
+                            # Get the date for this trade
+                            trade_date = datetime.fromtimestamp(trade_time / 1000).strftime('%Y-%m-%d')
+
+                            if sym not in symbol_volumes:
+                                symbol_volumes[sym] = {
+                                    'base_volume': 0.0,
+                                    'quote_volume': 0.0,
+                                    'trade_count': 0,
+                                    'buy_volume': 0.0,
+                                    'sell_volume': 0.0,
+                                    'buy_count': 0,
+                                    'sell_count': 0
+                                }
+
+                            symbol_volumes[sym]['base_volume'] += qty
+                            symbol_volumes[sym]['quote_volume'] += quote_qty
+                            symbol_volumes[sym]['trade_count'] += 1
+                            total_quote_volume += quote_qty
+                            total_trades += 1
+
+                            # Track by day
+                            if trade_date not in daily_volumes:
+                                daily_volumes[trade_date] = {
+                                    'quote_volume': 0.0,
+                                    'trade_count': 0,
+                                    'buy_volume': 0.0,
+                                    'sell_volume': 0.0,
+                                    'buy_count': 0,
+                                    'sell_count': 0
+                                }
+
+                            daily_volumes[trade_date]['quote_volume'] += quote_qty
+                            daily_volumes[trade_date]['trade_count'] += 1
+
+                            # Track buy vs sell
+                            if trade['side'] == 'BUY':
+                                symbol_volumes[sym]['buy_volume'] += quote_qty
+                                symbol_volumes[sym]['buy_count'] += 1
+                                daily_volumes[trade_date]['buy_volume'] += quote_qty
+                                daily_volumes[trade_date]['buy_count'] += 1
+                            else:
+                                symbol_volumes[sym]['sell_volume'] += quote_qty
+                                symbol_volumes[sym]['sell_count'] += 1
+                                daily_volumes[trade_date]['sell_volume'] += quote_qty
+                                daily_volumes[trade_date]['sell_count'] += 1
 
         except Exception as e:
             print(f"[ERROR] Error fetching trades: {e}")
