@@ -67,60 +67,132 @@ async def get_my_trading_volume(symbol: str = None, days: int = 7):
 
             if symbol:
                 # Get trades for specific symbol with pagination
+                # Note: API has a 7-day maximum for startTime/endTime queries
                 all_trades = []
-                from_id = None
-                batch = 0
 
-                # Pagination loop - keep fetching until we get all trades
-                while True:
-                    batch += 1
-                    params = {
-                        'symbol': symbol,
-                        'limit': 1000
-                    }
+                # Break into 7-day chunks if needed
+                MAX_DAYS_PER_REQUEST = 7
+                if days > MAX_DAYS_PER_REQUEST:
+                    print(f"[INFO] Period exceeds {MAX_DAYS_PER_REQUEST} days, will fetch in chunks...")
 
-                    # Use fromId for pagination (not compatible with time filters)
-                    if from_id:
-                        params['fromId'] = from_id
-                    else:
-                        # First request - use time filters
-                        params['startTime'] = start_time
-                        params['endTime'] = end_time
+                    # Calculate chunks
+                    chunk_size_ms = MAX_DAYS_PER_REQUEST * 24 * 60 * 60 * 1000
+                    current_start = start_time
 
-                    signed_params = client._sign(params)
+                    while current_start < end_time:
+                        current_end = min(current_start + chunk_size_ms, end_time)
 
-                    async with client.session.get(url, params=signed_params) as response:
-                        if response.status != 200:
-                            error_text = await response.text()
-                            print(f"[ERROR] API returned status {response.status}: {error_text}")
-                            break
+                        print(f"[INFO] Fetching chunk: {datetime.fromtimestamp(current_start/1000)} to {datetime.fromtimestamp(current_end/1000)}")
 
-                        trades = await response.json()
+                        # Fetch this chunk with pagination
+                        from_id = None
+                        batch = 0
 
-                        if not trades:
-                            break
+                        while True:
+                            batch += 1
+                            params = {
+                                'symbol': symbol,
+                                'limit': 1000
+                            }
 
-                        # Filter trades by time range (important when using fromId)
-                        filtered_trades = [t for t in trades if start_time <= int(t['time']) <= end_time]
-                        all_trades.extend(filtered_trades)
+                            if from_id:
+                                params['fromId'] = from_id
+                            else:
+                                params['startTime'] = current_start
+                                params['endTime'] = current_end
 
-                        print(f"[INFO] Batch {batch}: Fetched {len(trades)} trades ({len(filtered_trades)} in time range)")
+                            signed_params = client._sign(params)
 
-                        # If we got less than 1000, we're done
-                        if len(trades) < 1000:
-                            break
+                            async with client.session.get(url, params=signed_params) as response:
+                                if response.status != 200:
+                                    error_text = await response.text()
+                                    print(f"[ERROR] API returned status {response.status}: {error_text}")
+                                    break
 
-                        # Update fromId for next batch
-                        from_id = trades[-1]['id'] + 1
+                                chunk_trades = await response.json()
 
-                        # Check if last trade is beyond our end time
-                        if int(trades[-1]['time']) > end_time:
-                            break
+                                if not chunk_trades:
+                                    break
 
+                                # Filter by chunk time range
+                                filtered_trades = [t for t in chunk_trades if current_start <= int(t['time']) < current_end]
+                                all_trades.extend(filtered_trades)
+
+                                print(f"[INFO] Chunk batch {batch}: Fetched {len(chunk_trades)} trades ({len(filtered_trades)} in range)")
+
+                                if len(chunk_trades) < 1000:
+                                    break
+
+                                from_id = chunk_trades[-1]['id'] + 1
+
+                                if int(chunk_trades[-1]['time']) >= current_end:
+                                    break
+
+                                await asyncio.sleep(0.1)
+
+                        # Move to next chunk
+                        current_start = current_end
                         await asyncio.sleep(0.1)
 
-                print(f"[INFO] Total: {len(all_trades)} trades for {symbol}")
-                trades = all_trades
+                    print(f"[INFO] Total: {len(all_trades)} trades for {symbol}")
+                    trades = all_trades
+
+                else:
+                    # Single request for <= 7 days
+                    from_id = None
+                    batch = 0
+
+                    # Pagination loop - keep fetching until we get all trades
+                    while True:
+                        batch += 1
+                        params = {
+                            'symbol': symbol,
+                            'limit': 1000
+                        }
+
+                        # Use fromId for pagination (not compatible with time filters)
+                        if from_id:
+                            params['fromId'] = from_id
+                        else:
+                            # First request - use time filters
+                            params['startTime'] = start_time
+                            params['endTime'] = end_time
+
+                        signed_params = client._sign(params)
+
+                        async with client.session.get(url, params=signed_params) as response:
+                            if response.status != 200:
+                                error_text = await response.text()
+                                print(f"[ERROR] API returned status {response.status}: {error_text}")
+                                break
+
+                            trades = await response.json()
+
+                            if not trades:
+                                break
+
+                            # Filter trades by time range (important when using fromId)
+                            # Use < for end_time to avoid boundary issues
+                            filtered_trades = [t for t in trades if start_time <= int(t['time']) < end_time]
+                            all_trades.extend(filtered_trades)
+
+                            print(f"[INFO] Batch {batch}: Fetched {len(trades)} trades ({len(filtered_trades)} in time range)")
+
+                            # If we got less than 1000, we're done
+                            if len(trades) < 1000:
+                                break
+
+                            # Update fromId for next batch
+                            from_id = trades[-1]['id'] + 1
+
+                            # Check if last trade is beyond our end time
+                            if int(trades[-1]['time']) >= end_time:
+                                break
+
+                            await asyncio.sleep(0.1)
+
+                    print(f"[INFO] Total: {len(all_trades)} trades for {symbol}")
+                    trades = all_trades
 
                 # Process trades
                 for trade in trades:
@@ -204,49 +276,100 @@ async def get_my_trading_volume(symbol: str = None, days: int = 7):
                     """Fetch all trades for a single symbol."""
                     try:
                         all_trades_for_symbol = []
-                        from_id = None
-                        batch = 0
 
-                        while True:
-                            batch += 1
-                            params = {
-                                'symbol': sym,
-                                'limit': 1000
-                            }
+                        # Break into 7-day chunks if needed
+                        MAX_DAYS_PER_REQUEST = 7
+                        if days > MAX_DAYS_PER_REQUEST:
+                            chunk_size_ms = MAX_DAYS_PER_REQUEST * 24 * 60 * 60 * 1000
+                            current_start = start_time
 
-                            if from_id:
-                                params['fromId'] = from_id
-                            else:
-                                params['startTime'] = start_time
-                                params['endTime'] = end_time
+                            while current_start < end_time:
+                                current_end = min(current_start + chunk_size_ms, end_time)
 
-                            signed_params = client._sign(params)
+                                from_id = None
+                                while True:
+                                    params = {
+                                        'symbol': sym,
+                                        'limit': 1000
+                                    }
 
-                            async with client.session.get(url, params=signed_params) as response:
-                                if response.status == 200:
-                                    trades = await response.json()
+                                    if from_id:
+                                        params['fromId'] = from_id
+                                    else:
+                                        params['startTime'] = current_start
+                                        params['endTime'] = current_end
 
-                                    if not trades:
-                                        break
+                                    signed_params = client._sign(params)
 
-                                    # Filter by time range
-                                    filtered_trades = [t for t in trades if start_time <= int(t['time']) <= end_time]
-                                    all_trades_for_symbol.extend(filtered_trades)
+                                    async with client.session.get(url, params=signed_params) as response:
+                                        if response.status == 200:
+                                            trades = await response.json()
 
-                                    # If we got less than 1000, we're done
-                                    if len(trades) < 1000:
-                                        break
+                                            if not trades:
+                                                break
 
-                                    # Update fromId for next batch
-                                    from_id = trades[-1]['id'] + 1
+                                            filtered_trades = [t for t in trades if current_start <= int(t['time']) < current_end]
+                                            all_trades_for_symbol.extend(filtered_trades)
 
-                                    # Check if last trade is beyond our end time
-                                    if int(trades[-1]['time']) > end_time:
-                                        break
+                                            if len(trades) < 1000:
+                                                break
 
-                                    await asyncio.sleep(0.05)
+                                            from_id = trades[-1]['id'] + 1
+
+                                            if int(trades[-1]['time']) >= current_end:
+                                                break
+
+                                            await asyncio.sleep(0.05)
+                                        else:
+                                            break
+
+                                current_start = current_end
+                                await asyncio.sleep(0.05)
+                        else:
+                            # Single fetch for <= 7 days
+                            from_id = None
+                            batch = 0
+
+                            while True:
+                                batch += 1
+                                params = {
+                                    'symbol': sym,
+                                    'limit': 1000
+                                }
+
+                                if from_id:
+                                    params['fromId'] = from_id
                                 else:
-                                    break
+                                    params['startTime'] = start_time
+                                    params['endTime'] = end_time
+
+                                signed_params = client._sign(params)
+
+                                async with client.session.get(url, params=signed_params) as response:
+                                    if response.status == 200:
+                                        trades = await response.json()
+
+                                        if not trades:
+                                            break
+
+                                        # Filter by time range
+                                        filtered_trades = [t for t in trades if start_time <= int(t['time']) < end_time]
+                                        all_trades_for_symbol.extend(filtered_trades)
+
+                                        # If we got less than 1000, we're done
+                                        if len(trades) < 1000:
+                                            break
+
+                                        # Update fromId for next batch
+                                        from_id = trades[-1]['id'] + 1
+
+                                        # Check if last trade is beyond our end time
+                                        if int(trades[-1]['time']) >= end_time:
+                                            break
+
+                                        await asyncio.sleep(0.05)
+                                    else:
+                                        break
 
                         return sym, all_trades_for_symbol
 
